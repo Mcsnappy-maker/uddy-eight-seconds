@@ -13,7 +13,7 @@ import '@babylonjs/loaders/glTF';
 import { OrientedBoxCollider } from '../simulation/PhysicsWorld';
 import { MaterialPalette } from './PBRMaterials';
 
-export type AttackerVariant = 'variant_a' | 'variant_b';
+export type AttackerVariant = 'variant_a' | 'variant_b' | 'variant_c' | 'variant_d';
 
 export type KeeperPoseMode =
   | 'ready'
@@ -245,30 +245,23 @@ async function loadCharacterGltf(
   return new SkinnedGltfRig(gltfRoot, meshes);
 }
 
+const VARIANT_FILES: Record<AttackerVariant, string> = {
+  variant_a: 'uddy_attacker_a.glb',
+  variant_b: 'uddy_attacker_b.glb',
+  variant_c: 'uddy_attacker_c.glb',
+  variant_d: 'uddy_attacker_d.glb',
+};
+
 export class AttackerVisualRig {
   public readonly root: TransformNode;
-  private variantARig: SkinnedGltfRig | null = null;
-  private variantBRig: SkinnedGltfRig | null = null;
-  private activeVariant: AttackerVariant = 'variant_a';
-  private stickNodeA: TransformNode | null = null;
-  private stickNodeB: TransformNode | null = null;
+  private readonly rigs = new Map<AttackerVariant, { rig: SkinnedGltfRig; stickNode: TransformNode }>();
+  private activeVariant: AttackerVariant = 'variant_b';
 
   constructor(_palette: MaterialPalette, scene: Scene) {
     this.root = new TransformNode('attacker_root', scene);
   }
 
   public async loadAsync(scene: Scene, shadowGen?: ShadowGenerator): Promise<void> {
-    const [rigA, rigB, stickResA, stickResB] = await Promise.all([
-      loadCharacterGltf('uddy_attacker_a.glb', scene, this.root, shadowGen),
-      loadCharacterGltf('uddy_attacker_b.glb', scene, this.root, shadowGen),
-      SceneLoader.ImportMeshAsync(null, './assets/models/', 'uddy_stick.glb', scene),
-      SceneLoader.ImportMeshAsync(null, './assets/models/', 'uddy_stick.glb', scene),
-    ]);
-
-    this.variantARig = rigA;
-    this.variantBRig = rigB;
-
-    // Parent sticks directly inside each character's gltfRoot so coordinates match 1:1 in model space
     const setupStick = (res: Awaited<ReturnType<typeof SceneLoader.ImportMeshAsync>>, parentGltf: TransformNode) => {
       const stickRoot = new TransformNode('att_stick_model_space', scene);
       stickRoot.parent = parentGltf;
@@ -283,22 +276,32 @@ export class AttackerVisualRig {
       return stickRoot;
     };
 
-    this.stickNodeA = setupStick(stickResA, rigA.gltfRoot);
-    this.stickNodeB = setupStick(stickResB, rigB.gltfRoot);
+    const variantEntries = Object.entries(VARIANT_FILES) as [AttackerVariant, string][];
+    await Promise.all(
+      variantEntries.map(async ([variant, filename]) => {
+        const [rig, stickRes] = await Promise.all([
+          loadCharacterGltf(filename, scene, this.root, shadowGen),
+          SceneLoader.ImportMeshAsync(null, './assets/models/', 'uddy_stick.glb', scene),
+        ]);
+        const stickNode = setupStick(stickRes, rig.gltfRoot);
+        this.rigs.set(variant, { rig, stickNode });
+      }),
+    );
 
     this.setVariant(this.activeVariant);
     this.updateAnimation(0, 0, 0, 0, 0);
   }
 
   public getTriangleStats(): { meshes: number; vertices: number; bones: number } {
-    const rig = this.activeVariant === 'variant_a' ? this.variantARig : this.variantBRig;
-    return rig ? rig.getMeshTriangleStats() : { meshes: 0, vertices: 0, bones: 0 };
+    const entry = this.rigs.get(this.activeVariant);
+    return entry ? entry.rig.getMeshTriangleStats() : { meshes: 0, vertices: 0, bones: 0 };
   }
 
   public setVariant(variant: AttackerVariant): void {
     this.activeVariant = variant;
-    if (this.variantARig) this.variantARig.gltfRoot.setEnabled(variant === 'variant_a');
-    if (this.variantBRig) this.variantBRig.gltfRoot.setEnabled(variant === 'variant_b');
+    for (const [key, entry] of this.rigs.entries()) {
+      entry.rig.gltfRoot.setEnabled(key === variant);
+    }
   }
 
   public updateAnimation(
@@ -308,9 +311,9 @@ export class AttackerVisualRig {
     swing01: number,
     feintLateral: number,
   ): void {
-    const rig = this.activeVariant === 'variant_a' ? this.variantARig : this.variantBRig;
-    const stickNode = this.activeVariant === 'variant_a' ? this.stickNodeA : this.stickNodeB;
-    if (!rig || !stickNode) return;
+    const entry = this.rigs.get(this.activeVariant);
+    if (!entry) return;
+    const { rig, stickNode } = entry;
 
     const speedFactor = Math.min(1, speedMps / 7.2);
     const stride = Math.sin(walkPhase) * 0.56 * speedFactor;
@@ -468,15 +471,15 @@ export class KeeperVisualRig {
       lLegSpread += Math.max(0, s);
       rLegSpread -= Math.max(0, -s);
     } else if (pose === 'save_low_left') {
-      dropY -= 0.24 * p;
-      bodyTiltZ = 0.22 * p;
-      lLegSpread = 0.18 + 0.72 * p;
-      lKnee = 0.2 + 0.15 * p;
+      dropY -= 0.28 * p;
+      bodyTiltZ = 0.28 * p;
+      lLegSpread = 0.24 + 0.96 * p;
+      lKnee = 0.16 + 0.15 * p;
     } else if (pose === 'save_low_right') {
-      dropY -= 0.24 * p;
-      bodyTiltZ = -0.22 * p;
-      rLegSpread = -0.18 - 0.72 * p;
-      rKnee = 0.2 + 0.15 * p;
+      dropY -= 0.28 * p;
+      bodyTiltZ = -0.28 * p;
+      rLegSpread = -0.24 - 0.96 * p;
+      rKnee = 0.16 + 0.15 * p;
     }
 
     const jointDeltas: Record<string, Quaternion> = {
@@ -498,13 +501,13 @@ export class KeeperVisualRig {
 
     // Position Left-Hand Blocker out in ready defensive guard & Right-Hand Stick ready across low right side
     const leftBlockerTarget = new Vector3(
-      0.34 + (pose === 'save_high_blocker' ? 0.28 * p : pose === 'save_low_left' ? 0.35 * p : 0),
-      1.02 + (pose === 'save_high_blocker' ? 0.48 * p : pose === 'save_low_left' ? -0.35 * p : 0),
+      0.34 + (pose === 'save_high_blocker' ? 0.42 * p : pose === 'save_low_left' ? 0.48 * p : 0),
+      1.02 + (pose === 'save_high_blocker' ? 0.60 * p : pose === 'save_low_left' ? -0.38 * p : 0),
       0.34,
     );
     const rightStickHandTarget = new Vector3(
-      -0.32 - (pose === 'save_stick_sweep' ? 0.42 * p : pose === 'save_low_right' ? 0.32 * p : 0),
-      0.86 - (pose === 'save_low_right' ? 0.32 * p : 0),
+      -0.32 - (pose === 'save_stick_sweep' ? 0.58 * p : pose === 'save_low_right' ? 0.46 * p : 0),
+      0.86 - (pose === 'save_low_right' ? 0.36 * p : pose === 'save_stick_sweep' ? 0.24 * p : 0),
       0.32,
     );
 
@@ -537,7 +540,7 @@ export class KeeperVisualRig {
 
     const rhPos = rig.getModelPos('hand_r');
     this.stickNode.position.copyFrom(rhPos);
-    const stickDir = new Vector3(-0.22 - (pose === 'save_stick_sweep' ? 0.55 * p : 0), -0.92, 0.24).normalize();
+    const stickDir = new Vector3(-0.22 - (pose === 'save_stick_sweep' ? 0.72 * p : 0), -0.92, 0.24).normalize();
     const qStick = new Quaternion();
     Quaternion.FromUnitVectorsToRef(new Vector3(0, -1, 0), stickDir, qStick);
     this.stickNode.rotationQuaternion = qStick;
@@ -574,14 +577,14 @@ export class KeeperVisualRig {
     };
 
     return [
-      toBox(this.leftFootColliderNode, new Vector3(-0.2, 0.1, 0.1), 'gk_kicker_l', 'keeper_kicker', { x: 0.11, y: 0.1, z: 0.18 }, 0.62),
-      toBox(this.rightFootColliderNode, new Vector3(0.2, 0.1, 0.1), 'gk_kicker_r', 'keeper_kicker', { x: 0.11, y: 0.1, z: 0.18 }, 0.62),
-      toBox(this.leftCalfColliderNode, new Vector3(-0.2, 0.4, 0.08), 'gk_guard_l', 'keeper_pad', { x: 0.12, y: 0.28, z: 0.11 }, 0.48),
-      toBox(this.rightCalfColliderNode, new Vector3(0.2, 0.4, 0.08), 'gk_guard_r', 'keeper_pad', { x: 0.12, y: 0.28, z: 0.11 }, 0.48),
-      toBox(this.torsoColliderNode, new Vector3(0, 1.05, 0), 'gk_torso', 'keeper_pad', { x: 0.25, y: 0.28, z: 0.16 }, 0.34),
-      toBox(this.leftHandColliderNode, new Vector3(-0.35, 0.95, 0.2), 'gk_blocker', 'keeper_blocker', { x: 0.13, y: 0.17, z: 0.08 }, 0.54),
+      toBox(this.leftFootColliderNode, new Vector3(-0.2, 0.1, 0.1), 'gk_kicker_l', 'keeper_kicker', { x: 0.17, y: 0.14, z: 0.20 }, 0.62),
+      toBox(this.rightFootColliderNode, new Vector3(0.2, 0.1, 0.1), 'gk_kicker_r', 'keeper_kicker', { x: 0.17, y: 0.14, z: 0.20 }, 0.62),
+      toBox(this.leftCalfColliderNode, new Vector3(-0.2, 0.4, 0.08), 'gk_guard_l', 'keeper_pad', { x: 0.17, y: 0.32, z: 0.15 }, 0.48),
+      toBox(this.rightCalfColliderNode, new Vector3(0.2, 0.4, 0.08), 'gk_guard_r', 'keeper_pad', { x: 0.17, y: 0.32, z: 0.15 }, 0.48),
+      toBox(this.torsoColliderNode, new Vector3(0, 1.05, 0), 'gk_torso', 'keeper_pad', { x: 0.29, y: 0.32, z: 0.18 }, 0.34),
+      toBox(this.leftHandColliderNode, new Vector3(-0.35, 0.95, 0.2), 'gk_blocker', 'keeper_blocker', { x: 0.20, y: 0.22, z: 0.14 }, 0.54),
       toBox(this.headColliderNode, new Vector3(0, 1.55, 0), 'gk_helmet', 'keeper_helmet', { x: 0.14, y: 0.15, z: 0.15 }, 0.42),
-      toBox(this.rightHandColliderNode, new Vector3(0.35, 0.55, 0.25), 'gk_stick', 'keeper_stick', { x: 0.14, y: 0.36, z: 0.14 }, 0.66),
+      toBox(this.rightHandColliderNode, new Vector3(0.35, 0.55, 0.25), 'gk_stick', 'keeper_stick', { x: 0.22, y: 0.40, z: 0.16 }, 0.66),
     ];
   }
 }

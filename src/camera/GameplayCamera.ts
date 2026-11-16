@@ -2,6 +2,7 @@ import { FreeCamera, Scene, Vector3 } from '@babylonjs/core';
 import { Vec3 } from '../rules/RulesConfig';
 
 export type CameraViewMode =
+  | 'title_screen'
   | 'gameplay'
   | 'athlete_closeup'
   | 'keeper_closeup'
@@ -28,6 +29,37 @@ export class GameplayCamera {
 
   public setMode(mode: CameraViewMode): void {
     this.mode = mode;
+  }
+
+  public updateTitleCamera(
+    dt: number,
+    elapsedTime: number,
+    allowIdleMotion: boolean,
+    snapImmediately: boolean = false,
+  ): void {
+    const desiredPos = allowIdleMotion
+      ? new Vector3(
+          Math.sin(elapsedTime * 0.25) * 2.1,
+          2.75 + Math.cos(elapsedTime * 0.18) * 0.1,
+          17.8,
+        )
+      : new Vector3(0, 2.75, 17.8);
+    const desiredTarget = new Vector3(0, 0.95, 1.2);
+
+    const alpha = snapImmediately || !allowIdleMotion ? 1.0 : 1 - Math.exp(-3.5 * dt);
+    this.currentPos.set(
+      lerp(this.currentPos.x, desiredPos.x, alpha),
+      lerp(this.currentPos.y, desiredPos.y, alpha),
+      lerp(this.currentPos.z, desiredPos.z, alpha),
+    );
+    this.currentTarget.set(
+      lerp(this.currentTarget.x, desiredTarget.x, alpha),
+      lerp(this.currentTarget.y, desiredTarget.y, alpha),
+      lerp(this.currentTarget.z, desiredTarget.z, alpha),
+    );
+
+    this.camera.position.copyFrom(this.currentPos);
+    this.camera.setTarget(this.currentTarget);
   }
 
   public update(

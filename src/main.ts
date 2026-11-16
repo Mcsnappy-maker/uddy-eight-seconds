@@ -11,5 +11,5 @@ if (!canvas || !uiRoot) {
 const app = new HockeyGameApp(canvas, uiRoot);
 app.init().catch((err) => {
   console.error('Failed to initialize Uddy: Eight Seconds:', err);
-  uiRoot.innerHTML = `<div class="fatal-error"><h2>Graphics Initialization Error</h2><p>${String(err)}</p></div>`;
+  app.reportInitError(err);
 });

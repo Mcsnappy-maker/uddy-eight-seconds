@@ -33,6 +33,7 @@ export class VenueScene {
   private netImpactLocal = new Vector3(0, 1.0, -1.0);
   private turfSpraySystem: ParticleSystem | null = null;
   private spectatorNodes: TransformNode[] = [];
+  private backgroundNodes: TransformNode[] = [];
   private qualityTier: QualityTier = 'showcase';
   private lightingPreset: LightingPreset = 'floodlit';
 
@@ -362,12 +363,35 @@ export class VenueScene {
     fenceBack.material = this.palette.metalFence;
     fenceBack.freezeWorldMatrix();
 
-    // Pitch-side Uddingston Hockey Club perimeter hoarding boards flanking behind goal
-    for (const bx of [-16, -8, 8, 16]) {
-      const board = MeshBuilder.CreateBox(`hoarding_${bx}`, { width: 7.4, height: 1.02, depth: 0.08 }, this.scene);
-      board.position = new Vector3(bx, 0.52, -5.08);
-      board.material = this.palette.clubHoardingBanner;
+    // Pitch-side perimeter boards behind goal: club identity + dedicated sponsor boards (unobstructed spectators above)
+    const backBoards = [
+      { x: -16, mat: this.palette.hoardingSponsorsB },
+      { x: -8, mat: this.palette.clubHoardingBanner },
+      { x: 8, mat: this.palette.hoardingSponsorsA },
+      { x: 16, mat: this.palette.clubHoardingBanner },
+    ];
+    for (const cfg of backBoards) {
+      const board = MeshBuilder.CreateBox(`hoarding_${cfg.x}`, { width: 7.4, height: 1.02, depth: 0.08 }, this.scene);
+      board.position = new Vector3(cfg.x, 0.52, -5.08);
+      board.material = cfg.mat;
       board.freezeWorldMatrix();
+    }
+
+    // Sideline perimeter boards along +X and -X pitch edges alternating club & sponsors
+    for (const side of [-1, 1]) {
+      for (let i = 0; i < 2; i += 1) {
+        const sz = 4.5 + i * 10.0;
+        const sideBoard = MeshBuilder.CreateBox(
+          `side_hoarding_${side}_${i}`,
+          { width: 8.2, height: 1.02, depth: 0.08 },
+          this.scene,
+        );
+        sideBoard.position = new Vector3(side * 28.4, 0.52, sz);
+        sideBoard.rotation.y = side * -Math.PI * 0.5;
+        sideBoard.material =
+          i === 0 ? this.palette.clubHoardingBanner : side > 0 ? this.palette.hoardingSponsorsA : this.palette.hoardingSponsorsB;
+        sideBoard.freezeWorldMatrix();
+      }
     }
 
     // High ball-stop mesh posts behind goal
@@ -448,10 +472,11 @@ export class VenueScene {
     for (let tx = -34; tx <= 34; tx += 5.5) {
       if (tx > -22 && tx < 9) continue;
       const tz = -12.5 - (Math.abs(tx) % 3);
+      const treeGroup = new TransformNode(`tree_grp_${tx}`, this.scene);
       const trunk = MeshBuilder.CreateCylinder(`tree_tr_${tx}`, { height: 2.6, diameter: 0.42 }, this.scene);
       trunk.position = new Vector3(tx, 1.3, tz);
       trunk.material = this.palette.woodBench;
-      trunk.freezeWorldMatrix();
+      trunk.parent = treeGroup;
 
       const offsets = [
         [0, 3.8, 0, 3.2, 2.5],
@@ -464,8 +489,9 @@ export class VenueScene {
         const puff = MeshBuilder.CreateSphere(`tree_can_${tx}_${p}`, { diameterX: w, diameterY: h, diameterZ: w * 0.9, segments: 8 }, this.scene);
         puff.position = new Vector3(tx + ox, oy, tz + oz);
         puff.material = this.palette.foliageMatte;
-        puff.freezeWorldMatrix();
+        puff.parent = treeGroup;
       }
+      this.backgroundNodes.push(treeGroup);
     }
 
     // 6 Floodlight Towers
@@ -576,6 +602,15 @@ export class VenueScene {
     this.turfSpraySystem.manualEmitCount = count;
   }
 
+  public setBackgroundDetailVisible(visible: boolean): void {
+    for (const node of this.spectatorNodes) {
+      node.setEnabled(visible);
+    }
+    for (const node of this.backgroundNodes) {
+      node.setEnabled(visible);
+    }
+  }
+
   public applyAtmosphere(preset: LightingPreset, tier: QualityTier): void {
     this.lightingPreset = preset;
     this.qualityTier = tier;
@@ -595,7 +630,7 @@ export class VenueScene {
       this.mainSunLight.intensity = 1.85;
       this.mainSunLight.diffuse = Color3.FromHexString('#EAF2FF');
       for (const s of this.floodSpotLights) {
-        s.intensity = tier === 'showcase' ? 2.1 : 1.3;
+        s.intensity = tier === 'showcase' ? 2.1 : 1.35;
       }
     }
 
@@ -605,6 +640,8 @@ export class VenueScene {
     }
 
     if (tier === 'showcase') {
+      this.setBackgroundDetailVisible(true);
+      this.mainSunLight.shadowEnabled = true;
       this.pipeline = new DefaultRenderingPipeline('uddy_pipeline', true, this.scene, this.scene.cameras);
       this.pipeline.fxaaEnabled = true;
       this.pipeline.bloomEnabled = true;
@@ -617,8 +654,26 @@ export class VenueScene {
       if (this.shadowGenerator) {
         this.shadowGenerator.getShadowMap()!.refreshRate = 1;
       }
-    } else if (this.shadowGenerator) {
-      this.shadowGenerator.getShadowMap()!.refreshRate = 2;
+    } else if (tier === 'balanced') {
+      this.setBackgroundDetailVisible(true);
+      this.mainSunLight.shadowEnabled = true;
+      this.pipeline = new DefaultRenderingPipeline('uddy_pipeline', true, this.scene, this.scene.cameras);
+      this.pipeline.fxaaEnabled = true;
+      this.pipeline.bloomEnabled = false;
+      this.pipeline.imageProcessingEnabled = true;
+      this.pipeline.imageProcessing.toneMappingEnabled = true;
+      this.pipeline.imageProcessing.contrast = 1.1;
+      this.pipeline.imageProcessing.exposure = 1.04;
+      if (this.shadowGenerator) {
+        this.shadowGenerator.getShadowMap()!.refreshRate = 2;
+      }
+    } else {
+      // Compatible (Fast 60fps mobile tier): reduce expensive background & shadow passes while preserving full athletes & ball
+      this.setBackgroundDetailVisible(false);
+      this.mainSunLight.shadowEnabled = false;
+      if (this.shadowGenerator) {
+        this.shadowGenerator.getShadowMap()!.refreshRate = 0;
+      }
     }
   }
 }

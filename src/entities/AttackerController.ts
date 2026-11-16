@@ -69,6 +69,23 @@ export class AttackerController {
     return Math.sin(p * Math.PI * 2) * this.feintDir;
   }
 
+  public knockAhead(ballPos: Vec3, ballVel: Vec3, aimNormX: number): boolean {
+    const dist = Math.hypot(ballPos.x - this.pos.x, ballPos.z - this.pos.z);
+    if (!this.hasPossession && dist > 1.85) return false;
+    const targetX = clamp(-aimNormX * 1.4, -2.5, 2.5);
+    const dirX = targetX - ballPos.x;
+    const dirZ = -1.0 - ballPos.z;
+    const len = Math.max(0.5, Math.hypot(dirX, dirZ));
+    const speed = 9.8;
+    ballVel.x = (dirX / len) * speed;
+    ballVel.z = (dirZ / len) * speed;
+    ballVel.y = 0;
+    this.hasPossession = false;
+    this.reacquireCooldown = 0.22;
+    this.swingTimer = 0.16;
+    return true;
+  }
+
   public getAimGoalPoint(aimNormX: number, aimNormY: number, isLifted: boolean): Vec3 {
     // Screen left (-1) maps to +X world goal side; screen right (+1) maps to -X world goal side
     const targetX = clamp(-aimNormX * 1.72, -1.72, 1.72);
@@ -174,11 +191,11 @@ export class AttackerController {
     const distBall = Math.hypot(dxB, dzB);
     const ballSpeed = Math.hypot(ballVel.x, ballVel.z);
 
-    if (this.reacquireCooldown <= 0 && distBall <= 0.92 && ballPos.y <= 0.35) {
-      if (!this.hasPossession && ballSpeed < 13.5) {
+    if (this.reacquireCooldown <= 0 && distBall <= 1.30 && ballPos.y <= 0.45) {
+      if (!this.hasPossession && ballSpeed < 16.0) {
         this.hasPossession = true;
       }
-    } else if (distBall > 1.35) {
+    } else if (distBall > 1.65) {
       this.hasPossession = false;
     }
 
@@ -186,8 +203,6 @@ export class AttackerController {
     if (this.hasPossession) {
       const fwdX = Math.sin(this.yaw);
       const fwdZ = Math.cos(this.yaw);
-      // Right vector when facing (fwdX, fwdZ): (-fwdZ, fwdX) in world? Wait: facing -Z (0, -1), right is -X (-1, 0):
-      // Verify: (fwdZ, -fwdX) = (-1, 0)! Let's verify for +Z (0, 1): (1, 0) = +X! Yes!
       const rightX = fwdZ;
       const rightZ = -fwdX;
       const feintOffset = this.getFeintLateral() * 0.42;
@@ -204,11 +219,11 @@ export class AttackerController {
       onDribbleTouch(ballPos);
     }
 
-    // Shot Charging & Release (only legal while in possession or within stick reach of live rebound)
-    const canShoot = this.hasPossession || (distBall <= 1.15 && ballPos.y <= 0.45 && this.reacquireCooldown <= 0);
+    // Shot Charging & Release (generous reach so rolling and rebounding shots connect cleanly)
+    const canShoot = this.hasPossession || (distBall <= 1.85 && ballPos.y <= 0.65 && this.reacquireCooldown <= 0);
     if (input.chargingShot && canShoot) {
       this.wasCharging = true;
-      this.charge01 = clamp(this.charge01 + dt * 1.45, 0.15, 1.0);
+      this.charge01 = clamp(this.charge01 + dt * 1.45, 0.25, 1.0);
       // Face goal smoothly while winding up
       const goalYaw = Math.atan2(-this.pos.x, -this.pos.z);
       let diff = goalYaw - this.yaw;
@@ -216,7 +231,7 @@ export class AttackerController {
       while (diff < -Math.PI) diff += Math.PI * 2;
       this.yaw += clamp(diff, -10 * dt, 10 * dt);
     } else if ((this.wasCharging || input.releaseShotTriggered) && canShoot) {
-      const power = clamp(Math.max(0.32, this.charge01), 0.25, 1.0);
+      const power = clamp(Math.max(0.55, this.charge01), 0.55, 1.0);
       this.wasCharging = false;
       this.charge01 = 0;
       this.swingTimer = 0.24;
@@ -224,12 +239,14 @@ export class AttackerController {
       this.reacquireCooldown = 0.26;
 
       const targetPoint = this.getAimGoalPoint(input.aimNormX, input.aimNormY, input.liftedShotMode);
-      const baseSpeed = input.liftedShotMode ? 14.5 + power * 10.0 : 16.5 + power * 13.5;
-
-      // Launch ball vector directly along physical ballistic path
       const dirX = targetPoint.x - ballPos.x;
       const dirZ = targetPoint.z - ballPos.z;
       const horizDist = Math.max(0.5, Math.hypot(dirX, dirZ));
+      const distanceBoost = clamp((horizDist - 9.0) / 14.0, 0, 1) * 5.5;
+      const baseSpeed =
+        (input.liftedShotMode ? 14.5 + power * 10.0 : 16.5 + power * 13.5) + distanceBoost;
+
+      // Launch ball vector directly along physical ballistic path
       const flightTime = horizDist / baseSpeed;
       const dirY = targetPoint.y - ballPos.y;
       const vy = dirY / flightTime + 0.5 * FIH.GRAVITY * flightTime;

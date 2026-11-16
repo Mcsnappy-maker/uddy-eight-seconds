@@ -6,3 +6,5 @@ dist/
 Thumbs.db
 test-results/
 playwright-report/
+*.blend1
+.vercel/

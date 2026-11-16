@@ -5,7 +5,7 @@ import {
 } from '@babylonjs/core';
 
 export type RendererBackend = 'webgpu' | 'webgl2';
-export type QualityTier = 'showcase' | 'compatible';
+export type QualityTier = 'showcase' | 'balanced' | 'compatible';
 export type LightingPreset = 'floodlit' | 'daylight';
 
 export interface EngineInitResult {

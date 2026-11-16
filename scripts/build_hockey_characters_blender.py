@@ -129,6 +129,9 @@ def generate_skin_texture(name: str, base_rgb: tuple, lip_rgb: tuple, size: int 
     grain = rng.normal(0.0, 0.012, (size, size, 1)).astype(np.float32)
     rgba[:, :, :3] += grain
 
+    # Convert authored sRGB values to linear RGB because Blender expects linear floats in Image.pixels
+    rgba[:, :, :3] = np.power(np.clip(rgba[:, :, :3], 0.0, 1.0), 2.2)
+
     return make_image_from_rgba(name, rgba, TEX_DIR / f"{name}.png")
 
 
@@ -155,6 +158,17 @@ def generate_eye_texture(name: str, iris_rgb: tuple, size: int = 256) -> bpy.typ
 def generate_digit_bitmap(ch: str) -> np.ndarray:
     """Crisp 7x9 athletic block digit pattern."""
     patterns = {
+        "0": [
+            ".11111.",
+            "11...11",
+            "11...11",
+            "11...11",
+            "11...11",
+            "11...11",
+            "11...11",
+            "11...11",
+            ".11111.",
+        ],
         "1": [
             "..111..",
             ".1111..",
@@ -165,6 +179,83 @@ def generate_digit_bitmap(ch: str) -> np.ndarray:
             "...11..",
             "1111111",
             "1111111",
+        ],
+        "2": [
+            ".11111.",
+            "11...11",
+            ".....11",
+            "....11.",
+            "...11..",
+            "..11...",
+            ".11....",
+            "1111111",
+            "1111111",
+        ],
+        "3": [
+            ".11111.",
+            "11...11",
+            ".....11",
+            "..1111.",
+            ".....11",
+            ".....11",
+            ".....11",
+            "11...11",
+            ".11111.",
+        ],
+        "4": [
+            "11...11",
+            "11...11",
+            "11...11",
+            "1111111",
+            ".....11",
+            ".....11",
+            ".....11",
+            ".....11",
+            ".....11",
+        ],
+        "5": [
+            "1111111",
+            "11.....",
+            "11.....",
+            "111111.",
+            ".....11",
+            ".....11",
+            ".....11",
+            "11...11",
+            ".11111.",
+        ],
+        "6": [
+            ".11111.",
+            "11...11",
+            "11.....",
+            "111111.",
+            "11...11",
+            "11...11",
+            "11...11",
+            "11...11",
+            ".11111.",
+        ],
+        "7": [
+            "1111111",
+            "1111111",
+            "....11.",
+            "...11..",
+            "...11..",
+            "..11...",
+            "..11...",
+            "..11...",
+            "..11...",
+        ],
+        "8": [
+            ".11111.",
+            "11...11",
+            "11...11",
+            ".11111.",
+            "11...11",
+            "11...11",
+            "11...11",
+            "11...11",
+            ".11111.",
         ],
         "9": [
             ".11111.",
@@ -953,6 +1044,86 @@ def build_character(cfg: dict, base_verts, base_uvs, groups, cubes, rig_json, we
         )
         bind_to_armature(hair_obj, arm_obj)
 
+        if cfg.get("is_female", False):
+            # Sculpted athletic ponytail attached cleanly at occiput (+Y back, -Z down in Blender coords)
+            pt_curve = bpy.data.curves.new(f"{cfg['id']}_ponytail_curve", type="CURVE")
+            pt_curve.dimensions = "3D"
+            pt_curve.bevel_depth = 0.028
+            pt_curve.bevel_resolution = 6
+            pt_curve.resolution_u = 14
+            pt_curve.use_fill_caps = True
+
+            pts = [
+                (0.0, head_cy + 0.055, head_cz + 0.025, 0.42),
+                (0.0, head_cy + 0.085, head_cz + 0.015, 0.72),
+                (0.0, head_cy + 0.125, head_cz - 0.025, 1.05),
+                (0.0, head_cy + 0.145, head_cz - 0.095, 0.92),
+                (0.0, head_cy + 0.140, head_cz - 0.170, 0.42),
+            ]
+            spline = pt_curve.splines.new("NURBS")
+            spline.points.add(len(pts) - 1)
+            for i, (px, py, pz, rad) in enumerate(pts):
+                spline.points[i].co = (px, py, pz, 1.0)
+                spline.points[i].radius = rad
+            spline.use_endpoint_u = True
+
+            pt_obj = bpy.data.objects.new(f"{cfg['id']}_ponytail", pt_curve)
+            bpy.context.collection.objects.link(pt_obj)
+            pt_obj.select_set(True)
+            bpy.context.view_layer.objects.active = pt_obj
+            bpy.ops.object.convert(target="MESH")
+            pt_mesh_obj = bpy.context.active_object
+            pt_mesh_obj.data.materials.append(mat_hair)
+            for p in pt_mesh_obj.data.polygons:
+                p.use_smooth = True
+            vg_pt = pt_mesh_obj.vertex_groups.new(name="head")
+            vg_pt.add(list(range(len(pt_mesh_obj.data.vertices))), 1.0, "REPLACE")
+            bind_to_armature(pt_mesh_obj, arm_obj)
+
+            # Gold elastic hair tie ring at base of ponytail
+            mat_headband = create_pbr_mat(
+                f"{cfg['id']}_mat_headband",
+                None,
+                base_color=(0.95, 0.74, 0.12, 1.0),
+                metallic=0.05,
+                roughness=0.55,
+            )
+            bpy.ops.mesh.primitive_torus_add(
+                major_radius=0.024,
+                minor_radius=0.006,
+                location=(0.0, head_cy + 0.088, head_cz + 0.014),
+                rotation=(math.radians(65), 0.0, 0.0),
+            )
+            tie_obj = bpy.context.active_object
+            tie_obj.name = f"{cfg['id']}_ponytail_tie"
+            tie_obj.data.materials.append(mat_headband)
+            vg_tie = tie_obj.vertex_groups.new(name="head")
+            vg_tie.add(list(range(len(tie_obj.data.vertices))), 1.0, "REPLACE")
+            bind_to_armature(tie_obj, arm_obj)
+
+            # Fitted athletic headband extracted above brow & wrapped cleanly over hair
+            eye_z = float(np.max(morphed_bl[[vi for fv, _ in groups["helper-l-eye"] for vi in fv], 2]))
+            band_bot_z = eye_z + 0.022
+            band_top_z = band_bot_z + 0.028
+            headband_obj = extract_bisected_garment(
+                f"{cfg['id']}_headband",
+                morphed_bl,
+                body_faces,
+                lambda pts: any(band_bot_z - 0.03 <= p[2] <= band_top_z + 0.03 for p in pts),
+                [
+                    ((0, 0, band_bot_z), (0, -0.25, -1.0)),
+                    ((0, 0, band_top_z), (0, 0.25, 1.0)),
+                ],
+                0.012,
+                normals_bl,
+                weights_dict,
+                bone_names,
+                mat_headband,
+                uv_mode="planar",
+                solidify_m=0.003,
+            )
+            bind_to_armature(headband_obj, arm_obj)
+
     # Tailored Uddingston Jersey / Goalkeeper Smock (razor-clean bisected waist & bicep cuffs)
     j_offset = 0.015 if cfg["is_keeper"] else 0.007
     sleeve_x = 0.34 if cfg["is_keeper"] else 0.30
@@ -977,8 +1148,8 @@ def build_character(cfg: dict, base_verts, base_uvs, groups, cubes, rig_json, we
     )
     bind_to_armature(jersey_obj, arm_obj)
 
-    # Tailored Athletic Shorts (clean horizontal waist & mid-thigh hems)
-    shorts_bottom = knee_z + 0.14
+    # Tailored Athletic Shorts / Women's Hockey Skort Cut (clean horizontal waist & mid-thigh hems)
+    shorts_bottom = knee_z + (0.175 if cfg.get("is_female", False) else 0.14)
     shorts_top = pelvis_z + 0.09
     shorts_obj = extract_bisected_garment(
         f"{cfg['id']}_shorts",
@@ -1134,6 +1305,7 @@ def main():
             "id": "uddy_attacker_a",
             "number": "9",
             "is_keeper": False,
+            "is_female": False,
             "morphs": [
                 ("caucasian-male-young.target.gz", 1.0),
                 ("universal-male-young-maxmuscle-averageweight.target.gz", 0.65),
@@ -1147,19 +1319,48 @@ def main():
             "id": "uddy_attacker_b",
             "number": "11",
             "is_keeper": False,
+            "is_female": True,
             "morphs": [
                 ("african-female-young.target.gz", 1.0),
                 ("universal-female-young-maxmuscle-averageweight.target.gz", 0.65),
             ],
-            "skin_rgb": (0.42, 0.25, 0.17),
-            "lip_rgb": (0.34, 0.18, 0.14),
-            "iris_rgb": (0.16, 0.10, 0.06),
-            "hair_rgba": (0.04, 0.035, 0.03, 1.0),
+            "skin_rgb": (0.34, 0.20, 0.13),
+            "lip_rgb": (0.26, 0.13, 0.11),
+            "iris_rgb": (0.14, 0.09, 0.05),
+            "hair_rgba": (0.03, 0.025, 0.02, 1.0),
+        },
+        {
+            "id": "uddy_attacker_c",
+            "number": "7",
+            "is_keeper": False,
+            "is_female": True,
+            "morphs": [
+                ("universal-female-young-maxmuscle-averageweight.target.gz", 1.0),
+            ],
+            "skin_rgb": (0.58, 0.39, 0.26),
+            "lip_rgb": (0.48, 0.26, 0.24),
+            "iris_rgb": (0.18, 0.12, 0.07),
+            "hair_rgba": (0.06, 0.04, 0.03, 1.0),
+        },
+        {
+            "id": "uddy_attacker_d",
+            "number": "10",
+            "is_keeper": False,
+            "is_female": False,
+            "morphs": [
+                ("caucasian-male-young.target.gz", 0.5),
+                ("universal-male-young-maxmuscle-averageweight.target.gz", 0.8),
+            ],
+            "skin_rgb": (0.36, 0.22, 0.14),
+            "lip_rgb": (0.28, 0.15, 0.12),
+            "iris_rgb": (0.14, 0.09, 0.05),
+            "hair_rgba": (0.03, 0.025, 0.02, 1.0),
         },
         {
             "id": "uddy_goalkeeper",
             "number": "1",
             "is_keeper": True,
+            "is_female": False,
             "morphs": [
                 ("caucasian-male-young.target.gz", 1.0),
                 ("universal-male-young-maxmuscle-averageweight.target.gz", 0.85),

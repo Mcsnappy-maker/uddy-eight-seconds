@@ -29,20 +29,20 @@ const DIFFICULTY_TUNING: Record<DifficultyPreset, KeeperTuning> = {
     feintSusceptibility: 0.85,
   },
   club_challenge: {
-    maxSpeedMps: 3.7,
-    reactionDelaySec: 0.145,
-    commitDurationSec: 0.36,
-    recoveryDurationSec: 0.52,
-    advanceMaxZ: 5.2,
-    feintSusceptibility: 0.52,
+    maxSpeedMps: 4.85,
+    reactionDelaySec: 0.06,
+    commitDurationSec: 0.48,
+    recoveryDurationSec: 0.34,
+    advanceMaxZ: 3.4,
+    feintSusceptibility: 0.42,
   },
   cup_pressure: {
-    maxSpeedMps: 4.4,
-    reactionDelaySec: 0.095,
-    commitDurationSec: 0.32,
-    recoveryDurationSec: 0.4,
-    advanceMaxZ: 6.4,
-    feintSusceptibility: 0.3,
+    maxSpeedMps: 5.7,
+    reactionDelaySec: 0.03,
+    commitDurationSec: 0.46,
+    recoveryDurationSec: 0.26,
+    advanceMaxZ: 3.8,
+    feintSusceptibility: 0.25,
   },
 };
 
@@ -80,6 +80,16 @@ export class GoalkeeperAI {
     this.lastBallSpeed = 0;
   }
 
+  public alignToBall(ballPos: Vec3): void {
+    const z = clamp(1.1 + (18.0 - Math.min(18, ballPos.z)) * 0.12, 0.9, 2.4);
+    const x = clamp(ballPos.x * (z / Math.max(1.5, ballPos.z)), -1.45, 1.45);
+    this.pos = { x, y: 0, z };
+    this.vel = { x: 0, y: 0, z: 0 };
+    this.yaw = clamp(Math.atan2(ballPos.x - x, Math.max(0.5, ballPos.z - z)), -0.75, 0.75);
+    this.poseMode = 'ready';
+    this.saveProgress01 = 0;
+  }
+
   public step(
     dt: number,
     active: boolean,
@@ -99,7 +109,10 @@ export class GoalkeeperAI {
 
     const tune = DIFFICULTY_TUNING[difficulty];
     const ballSpeed = Math.hypot(ballVel.x, ballVel.z);
-    const shotFlyingTowardGoal = ballVel.z < -4.5 && ballPos.z < 17.5;
+    const shotFlyingTowardGoal =
+      difficulty === 'first_go'
+        ? ballVel.z < -4.5 && ballPos.z < 17.5
+        : ballVel.z < -3.5 && ballPos.z < 24.5;
 
     // Perception reacts only to visible ball motion, attacker wind-up, and feints — never hidden aim
     if (Math.abs(attackerFeintLateral) > 0.25 && this.state !== 'commit' && this.state !== 'recover') {
@@ -111,12 +124,27 @@ export class GoalkeeperAI {
     if (this.state === 'commit') {
       this.stateTimer += dt;
       this.saveProgress01 = clamp(this.stateTimer / tune.commitDurationSec, 0, 1);
-      const lungeDx = clamp(this.committedTargetX - this.pos.x, -1.5, 1.5);
-      this.vel.x = lungeDx * 4.8 * (1 - this.saveProgress01 * 0.5);
+      if (difficulty !== 'first_go' && ballVel.z < -2.0 && ballPos.z > this.pos.z - 0.1) {
+        const dz = this.pos.z - ballPos.z;
+        const timeToKeeper = dz / Math.min(-0.5, ballVel.z);
+        if (timeToKeeper > 0 && timeToKeeper < 0.8) {
+          this.committedTargetX = clamp(ballPos.x + ballVel.x * timeToKeeper, -1.85, 1.85);
+        }
+      }
+      const lungeDx = clamp(this.committedTargetX - this.pos.x, -1.8, 1.8);
+      if (difficulty === 'first_go') {
+        this.vel.x = lungeDx * 4.8 * (1 - this.saveProgress01 * 0.5);
+      } else {
+        this.vel.x = clamp(lungeDx * 8.5, -8.8, 8.8);
+      }
       this.vel.z = 0;
       this.pos.x = clamp(this.pos.x + this.vel.x * dt, -2.6, 2.6);
 
-      if (this.stateTimer >= tune.commitDurationSec) {
+      const readyToRecover =
+        difficulty === 'first_go'
+          ? this.stateTimer >= tune.commitDurationSec
+          : this.stateTimer >= tune.commitDurationSec && (ballPos.z <= this.pos.z + 0.1 || ballVel.z >= -1.0);
+      if (readyToRecover) {
         this.state = 'recover';
         this.stateTimer = 0;
         this.poseMode = 'recover';
@@ -150,7 +178,25 @@ export class GoalkeeperAI {
         // Project ball arrival at keeper Z depth
         const dz = this.pos.z - ballPos.z;
         const timeToKeeper = dz / Math.min(-0.5, ballVel.z);
-        if (timeToKeeper > 0 && timeToKeeper < 0.75) {
+        const maxCommitWindow = difficulty === 'first_go' ? 0.75 : 0.30;
+
+        if (difficulty !== 'first_go' && timeToKeeper > maxCommitWindow) {
+          // Track laterally across goal on long/medium-range shots instead of diving prematurely
+          const predX = clamp(ballPos.x + ballVel.x * timeToKeeper, -1.78, 1.78);
+          const dxTrack = predX - this.pos.x;
+          const trackSpeed = tune.maxSpeedMps * 1.45;
+          this.vel.x = clamp(dxTrack * 7.5, -trackSpeed, trackSpeed);
+          const desiredDepth = clamp(this.pos.z, 0.8, 2.4);
+          this.vel.z = clamp((desiredDepth - this.pos.z) * 4.0, -2.5, 2.5);
+          this.pos.x = clamp(this.pos.x + this.vel.x * dt, -1.85, 1.85);
+          this.pos.z = clamp(this.pos.z + this.vel.z * dt, 0.45, 2.6);
+          this.lateralPhase += Math.abs(this.vel.x) * dt * 3.0;
+          this.poseMode = Math.abs(this.vel.x) > 0.25 ? (this.vel.x < 0 ? 'shuffle_left' : 'shuffle_right') : 'ready';
+          this.yaw = clamp(Math.atan2(ballPos.x - this.pos.x, Math.max(0.5, ballPos.z - this.pos.z)), -0.75, 0.75);
+          return;
+        }
+
+        if (timeToKeeper > 0 && timeToKeeper <= maxCommitWindow) {
           const predX = clamp(ballPos.x + ballVel.x * timeToKeeper, -2.0, 2.0);
           const predY = ballPos.y + ballVel.y * timeToKeeper - 0.5 * FIH.GRAVITY * timeToKeeper * timeToKeeper;
           this.committedTargetX = predX;

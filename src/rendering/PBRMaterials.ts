@@ -14,6 +14,8 @@ export interface MaterialPalette {
   goalFrameWhite: PBRMaterial;
   backboardBlueGold: PBRMaterial;
   clubHoardingBanner: PBRMaterial;
+  hoardingSponsorsA: PBRMaterial;
+  hoardingSponsorsB: PBRMaterial;
   netCord: PBRMaterial;
   ballChalk: PBRMaterial;
   ballHighlightHalo: PBRMaterial;
@@ -320,10 +322,19 @@ function createCarbonStickMaterial(scene: Scene): PBRMaterial {
   return mat;
 }
 
-function createBannerMaterial(
+interface BoardLogoItem {
+  kind: 'image' | 'text';
+  src?: string;
+  text?: string;
+  subtitle?: string;
+  weight?: number;
+}
+
+function createSponsorBoardMaterial(
   name: string,
-  title: string,
-  subtitle: string,
+  bgHex: string,
+  trimHex: string,
+  items: BoardLogoItem[],
   widthPx: number,
   heightPx: number,
   flipU: boolean,
@@ -333,30 +344,90 @@ function createBannerMaterial(
   const tex = new DynamicTexture(`${name}_tex`, { width: widthPx, height: heightPx }, scene, true);
   const ctx = tex.getContext() as unknown as CanvasRenderingContext2D;
 
-  ctx.fillStyle = '#0D264F';
-  ctx.fillRect(0, 0, widthPx, heightPx);
-  ctx.fillStyle = UDDINGSTON_COLOURS.GOLD;
-  ctx.fillRect(0, 0, widthPx, 14);
-  ctx.fillRect(0, heightPx - 8, widthPx, 8);
+  const paintBase = () => {
+    ctx.fillStyle = bgHex;
+    ctx.fillRect(0, 0, widthPx, heightPx);
+    ctx.fillStyle = trimHex;
+    ctx.fillRect(0, 0, widthPx, 10);
+    ctx.fillRect(0, heightPx - 8, widthPx, 8);
+  };
 
-  ctx.fillStyle = UDDINGSTON_COLOURS.CHALK;
-  ctx.font = 'bold 34px Inter, Segoe UI, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText(title, widthPx * 0.5, heightPx * 0.56);
+  const paintSlots = (loadedImages: Map<string, HTMLImageElement>) => {
+    paintBase();
+    const totalWeight = items.reduce((s, it) => s + (it.weight ?? 1), 0);
+    const padX = 24;
+    const usableW = widthPx - padX * 2;
+    let curX = padX;
 
-  if (subtitle) {
-    ctx.fillStyle = UDDINGSTON_COLOURS.GOLD;
-    ctx.font = 'bold 18px Inter, Segoe UI, sans-serif';
-    ctx.fillText(subtitle, widthPx * 0.5, heightPx * 0.8);
+    for (let idx = 0; idx < items.length; idx += 1) {
+      const it = items[idx];
+      const slotW = (usableW * (it.weight ?? 1)) / Math.max(1, totalWeight);
+      const cx = curX + slotW * 0.5;
+      const cy = heightPx * 0.52;
+
+      if (it.kind === 'image' && it.src && loadedImages.has(it.src)) {
+        const img = loadedImages.get(it.src)!;
+        const maxW = slotW - 28;
+        const maxH = heightPx - 36;
+        const scale = Math.min(maxW / Math.max(1, img.naturalWidth), maxH / Math.max(1, img.naturalHeight));
+        const dw = img.naturalWidth * scale;
+        const dh = img.naturalHeight * scale;
+        ctx.drawImage(img, cx - dw * 0.5, cy - dh * 0.5, dw, dh);
+      } else {
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = UDDINGSTON_COLOURS.CHALK;
+        ctx.font = 'bold 34px Inter, Segoe UI, sans-serif';
+        if (it.subtitle) {
+          ctx.fillText(it.text ?? '', cx, heightPx * 0.43);
+          ctx.fillStyle = UDDINGSTON_COLOURS.GOLD;
+          ctx.font = 'bold 18px Inter, Segoe UI, sans-serif';
+          ctx.fillText(it.subtitle, cx, heightPx * 0.72);
+        } else {
+          ctx.fillText(it.text ?? '', cx, cy);
+        }
+      }
+
+      if (idx < items.length - 1 && it.kind === 'image' && items[idx + 1].kind === 'image') {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.14)';
+        ctx.fillRect(curX + slotW - 1, 24, 2, heightPx - 48);
+      }
+      curX += slotW;
+    }
+
+    tex.update(false);
+  };
+
+  paintSlots(new Map());
+
+  const imageSrcs = Array.from(new Set(items.filter((i) => i.kind === 'image' && i.src).map((i) => i.src!)));
+  if (imageSrcs.length > 0 && typeof Image !== 'undefined') {
+    const loaded = new Map<string, HTMLImageElement>();
+    let remaining = imageSrcs.length;
+    for (const src of imageSrcs) {
+      const img = new Image();
+      img.onload = () => {
+        loaded.set(src, img);
+        remaining -= 1;
+        if (remaining === 0) {
+          paintSlots(loaded);
+        } else {
+          paintSlots(loaded);
+        }
+      };
+      img.onerror = () => {
+        remaining -= 1;
+      };
+      img.src = src;
+    }
   }
 
-  tex.update(false);
   if (flipU) {
     tex.uScale = -1;
     tex.uOffset = 1;
   }
   mat.albedoTexture = tex;
-  mat.metallic = 0.05;
+  mat.metallic = 0.04;
   mat.roughness = 0.48;
   return mat;
 }
@@ -379,22 +450,66 @@ export function createMaterialPalette(scene: Scene): MaterialPalette {
   const pitchLine = createSimplePBR('pitch_line', UDDINGSTON_COLOURS.CHALK, 0.0, 0.55, scene);
   pitchLine.emissiveColor = Color3.FromHexString('#222730');
 
-  // uScale = -1 corrects Babylon CreateBox +Z face horizontal orientation so text reads left-to-right!
-  const backboardBlueGold = createBannerMaterial(
+  // uScale = -1 corrects Babylon CreateBox +Z face horizontal orientation so text & logos read left-to-right!
+  const backboardBlueGold = createSponsorBoardMaterial(
     'backboard_bg',
-    'UDDINGSTON HOCKEY CLUB',
-    '',
-    512,
-    128,
+    '#0B2866',
+    UDDINGSTON_COLOURS.GOLD,
+    [
+      { kind: 'image', src: './assets/branding/uddingston_crest.png', text: 'UHC', weight: 0.7 },
+      { kind: 'text', text: 'UDDINGSTON HOCKEY CLUB', weight: 2.6 },
+      { kind: 'image', src: './assets/branding/uddingston_crest.png', text: 'UHC', weight: 0.7 },
+    ],
+    1024,
+    160,
     true,
     scene,
   );
-  const clubHoardingBanner = createBannerMaterial(
+  const clubHoardingBanner = createSponsorBoardMaterial(
     'club_hoarding',
-    'UDDINGSTON HOCKEY CLUB  ·  EIGHT SECONDS',
-    'BLUE & GOLD  ·  OUTDOOR FIELD HOCKEY',
-    1024,
-    128,
+    '#0D264F',
+    UDDINGSTON_COLOURS.GOLD,
+    [
+      { kind: 'image', src: './assets/branding/uddingston_crest.png', text: 'UHC', weight: 0.65 },
+      {
+        kind: 'text',
+        text: 'UDDINGSTON HOCKEY CLUB  ·  EIGHT SECONDS',
+        subtitle: 'BLUE & GOLD  ·  OUTDOOR FIELD HOCKEY',
+        weight: 3.2,
+      },
+      { kind: 'image', src: './assets/branding/uddingston_crest.png', text: 'UHC', weight: 0.65 },
+    ],
+    1280,
+    160,
+    true,
+    scene,
+  );
+  const hoardingSponsorsA = createSponsorBoardMaterial(
+    'club_hoarding_a',
+    '#0B2866',
+    UDDINGSTON_COLOURS.GOLD,
+    [
+      { kind: 'image', src: './assets/branding/sponsor_tunnocks.png', text: "TUNNOCK'S", weight: 1.0 },
+      { kind: 'image', src: './assets/branding/sponsor_uddy_tv.png', text: 'UDDY TV', weight: 1.25 },
+      { kind: 'image', src: './assets/branding/sponsor_scottish_hockey.png', text: 'SCOTTISH HOCKEY', weight: 0.95 },
+    ],
+    1280,
+    160,
+    true,
+    scene,
+  );
+  const hoardingSponsorsB = createSponsorBoardMaterial(
+    'club_hoarding_b',
+    '#0B2866',
+    UDDINGSTON_COLOURS.GOLD,
+    [
+      { kind: 'image', src: './assets/branding/sponsor_wallace_whittle.png', text: 'WALLACE WHITTLE', weight: 1.2 },
+      { kind: 'image', src: './assets/branding/sponsor_drone_scotland.png', text: 'DRONE SCOTLAND', weight: 1.0 },
+      { kind: 'image', src: './assets/branding/sponsor_perfect_glazing.png', text: 'PERFECT GLAZING', weight: 1.25 },
+      { kind: 'image', src: './assets/branding/sponsor_deans.png', text: 'DEANS', weight: 0.9 },
+    ],
+    1280,
+    160,
     true,
     scene,
   );
@@ -435,6 +550,8 @@ export function createMaterialPalette(scene: Scene): MaterialPalette {
     goalFrameWhite: createSimplePBR('goal_frame', '#F4F7FC', 0.35, 0.32, scene),
     backboardBlueGold,
     clubHoardingBanner,
+    hoardingSponsorsA,
+    hoardingSponsorsB,
     netCord,
     ballChalk,
     ballHighlightHalo,
@@ -470,7 +587,7 @@ export function createMaterialPalette(scene: Scene): MaterialPalette {
     turfShoeUpper: createSimplePBR('shoe_upper', '#1D4C94', 0.08, 0.48, scene),
     turfShoeAccent: createSimplePBR('shoe_accent', UDDINGSTON_COLOURS.GOLD, 0.1, 0.4, scene),
     skinLightWarm: createSimplePBR('skin_light', '#E5B594', 0.0, 0.56, scene),
-    skinRichBrown: createSimplePBR('skin_brown', '#805237', 0.0, 0.54, scene),
+    skinRichBrown: createSimplePBR('skin_brown', '#4A2C1B', 0.0, 0.54, scene),
     hairDark: createSimplePBR('hair_dark', '#1C1613', 0.05, 0.72, scene),
     eyeWhite: createSimplePBR('eye_white', '#F5F7FA', 0.0, 0.3, scene),
     keeperFoamPanel: createKeeperPadMaterial('keeper_foam_panel', scene),
