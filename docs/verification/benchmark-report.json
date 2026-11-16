@@ -1,64 +1,111 @@
 {
-  "timestamp": "2026-11-16T19:39:34.452Z",
+  "timestamp": "2026-11-16T20:09:43.094Z",
   "machine": {
     "cpu": "Intel(R) Core(TM) Ultra 7 256V",
     "ramGB": 15.66,
-    "gpuExpected": "Intel(R) Arc(TM) 140V GPU (8GB shared)"
+    "gpuExpected": "Intel(R) Arc(TM) 140V GPU (8GB shared)",
+    "powerState": "AC Power Plugged In"
+  },
+  "benchmarkMethodology": {
+    "warmupDurationMs": 2000,
+    "samplingDurationMs": 5500,
+    "workload": "Active 120Hz dribble & keeper AI pursuit on 1920x1080 Showcase preset",
+    "vsyncNote": "Display refresh is 60 Hz (~16.67 ms vblank cadence); activeRenderWorkMs reports actual Babylon frame CPU/GPU work beneath the vblank cap."
   },
   "webgpuPass": {
-    "coldLoadMs": 2478,
-    "retryLatencyMs": 760,
+    "coldLoadMs": 3129,
+    "retryLatencyMs": 153,
     "benchmark": {
       "backend": "webgpu",
       "gpuAdapter": "intel / xe-2lpg",
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/157.0.0.0 Safari/537.36",
       "resolution": {
         "width": 1920,
         "height": 1080,
-        "dpr": 1
+        "dpr": 1,
+        "hardwareScaling": 1
       },
       "qualityTier": "showcase",
       "lightingPreset": "floodlit",
-      "frameCount": 331,
-      "avgFps": 60,
-      "p50FrameMs": 16.6,
-      "p95FrameMs": 17.1,
-      "p99FrameMs": 17.3,
-      "maxFrameMs": 17.6,
+      "frameCount": 329,
+      "avgFps": 59.81,
+      "p50FrameMs": 16.7,
+      "p95FrameMs": 17.3,
+      "p99FrameMs": 24.8,
+      "maxFrameMs": 25.4,
       "stallsOver50ms": 0,
-      "jsHeapMB": 63.95
+      "activeRenderWorkMs": {
+        "avg": 6.7,
+        "p50": 6.41,
+        "p95": 9.39,
+        "p99": 9.39
+      },
+      "characterAssetStats": {
+        "attacker": {
+          "meshes": 13,
+          "vertices": 23933,
+          "bones": 53
+        },
+        "keeper": {
+          "meshes": 20,
+          "vertices": 35021,
+          "bones": 53
+        }
+      },
+      "jsHeapMB": 90.11
     },
     "sampleOutcome": {
-      "attemptId": 8,
+      "attemptId": 9,
       "outcome": "Goal",
       "isGoal": true,
-      "reason": "Legal goal scored in 2.87 s from inside the circle.",
-      "elapsedSeconds": 2.866666666666659,
-      "savesCount": 0,
+      "reason": "Legal goal scored in 2.83 s from inside the circle.",
+      "elapsedSeconds": 2.833333333333326,
+      "savesCount": 2,
       "postHitsCount": 0,
-      "shotSpeedMps": 27.50004602001655,
+      "shotSpeedMps": 27.50036787273334,
       "rulesProfileId": "FIH-OUTDOOR-2027-DRAFT-SCOT-PENDING"
     }
   },
   "webgl2Pass": {
-    "coldLoadMs": 2634,
+    "coldLoadMs": 2756,
     "benchmark": {
       "backend": "webgl2",
       "gpuAdapter": "ANGLE (Intel, Intel(R) Arc(TM) 140V GPU (8GB) (0x000064A0) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/157.0.0.0 Safari/537.36",
       "resolution": {
         "width": 1920,
         "height": 1080,
-        "dpr": 1
+        "dpr": 1,
+        "hardwareScaling": 1
       },
       "qualityTier": "showcase",
       "lightingPreset": "floodlit",
       "frameCount": 330,
-      "avgFps": 60,
+      "avgFps": 59.99,
       "p50FrameMs": 16.7,
-      "p95FrameMs": 17,
-      "p99FrameMs": 17.1,
-      "maxFrameMs": 17.9,
+      "p95FrameMs": 17.1,
+      "p99FrameMs": 17.3,
+      "maxFrameMs": 17.8,
       "stallsOver50ms": 0,
-      "jsHeapMB": 60.55
+      "activeRenderWorkMs": {
+        "avg": 4.27,
+        "p50": 4.12,
+        "p95": 4.65,
+        "p99": 5.54
+      },
+      "characterAssetStats": {
+        "attacker": {
+          "meshes": 13,
+          "vertices": 23933,
+          "bones": 53
+        },
+        "keeper": {
+          "meshes": 20,
+          "vertices": 35021,
+          "bones": 53
+        }
+      },
+      "jsHeapMB": 98.29
     }
   },
   "consoleErrors": [],
@@ -66,7 +113,9 @@
   "proofScreenshots": [
     "01-uncut-attempt-active.png",
     "02-athlete-close-view.png",
+    "02b-athlete-close-daylight.png",
     "03-keeper-encounter-close.png",
+    "03b-keeper-close-daylight.png",
     "04-goal-event-backboard.png",
     "05-live-rebound-play.png",
     "06-daylight-materials.png",

@@ -42,6 +42,7 @@ export interface MaterialPalette {
   dugoutFrame: PBRMaterial;
   clubhouseWall: PBRMaterial;
   clubhouseGlass: PBRMaterial;
+  foliageMatte: PBRMaterial;
   woodBench: PBRMaterial;
 }
 
@@ -483,6 +484,7 @@ export function createMaterialPalette(scene: Scene): MaterialPalette {
     dugoutFrame: createSimplePBR('dugout_frame', '#12294F', 0.5, 0.4, scene),
     clubhouseWall: createSimplePBR('clubhouse_wall', '#2B3A52', 0.1, 0.78, scene),
     clubhouseGlass: createSimplePBR('clubhouse_glass', '#9CC2EB', 0.3, 0.12, scene),
+    foliageMatte: createSimplePBR('foliage_matte', '#23452E', 0.0, 0.96, scene),
     woodBench: createSimplePBR('wood_bench', '#6D4F35', 0.05, 0.76, scene),
   };
 }

@@ -404,29 +404,69 @@ export class VenueScene {
       bench.freezeWorldMatrix();
     }
 
-    // Clubhouse / Pavilion backdrop beyond back fence (labelled club-inspired) with architectural windows & columns
-    const clubhouse = MeshBuilder.CreateBox('clubhouse_insp', { width: 28, height: 5.6, depth: 8 }, this.scene);
-    clubhouse.position = new Vector3(-8, 2.8, -14.8);
-    clubhouse.material = this.palette.clubhouseWall;
-    clubhouse.freezeWorldMatrix();
+    // Two-storey Uddingston-inspired Sports Pavilion backdrop (clubhouse ground floor + viewing gallery + pitched overhang)
+    const lowerHall = MeshBuilder.CreateBox('clubhouse_base', { width: 30, height: 3.1, depth: 8.6 }, this.scene);
+    lowerHall.position = new Vector3(-7.5, 1.55, -14.8);
+    lowerHall.material = this.palette.clubhouseWall;
+    lowerHall.freezeWorldMatrix();
 
-    for (let wx = -19; wx <= 3; wx += 4.4) {
-      const win = MeshBuilder.CreateBox(`clubhouse_win_${wx}`, { width: 3.1, height: 1.85, depth: 0.14 }, this.scene);
-      win.position = new Vector3(wx, 3.3, -10.76);
+    const upperGallery = MeshBuilder.CreateBox('clubhouse_upper', { width: 29, height: 3.0, depth: 7.4 }, this.scene);
+    upperGallery.position = new Vector3(-7.5, 4.6, -15.4);
+    upperGallery.material = this.palette.dugoutFrame;
+    upperGallery.freezeWorldMatrix();
+
+    const balconyDeck = MeshBuilder.CreateBox('clubhouse_balcony', { width: 30.2, height: 0.28, depth: 2.2 }, this.scene);
+    balconyDeck.position = new Vector3(-7.5, 3.15, -10.8);
+    balconyDeck.material = this.palette.turfShoeSole;
+    balconyDeck.freezeWorldMatrix();
+
+    const balconyRail = MeshBuilder.CreateBox('clubhouse_rail', { width: 30.2, height: 0.95, depth: 0.08 }, this.scene);
+    balconyRail.position = new Vector3(-7.5, 3.76, -9.75);
+    balconyRail.material = this.palette.clubhouseGlass;
+    balconyRail.freezeWorldMatrix();
+
+    for (let wx = -19.5; wx <= 4.5; wx += 4.8) {
+      const win = MeshBuilder.CreateBox(`clubhouse_win_${wx}`, { width: 3.6, height: 1.9, depth: 0.14 }, this.scene);
+      win.position = new Vector3(wx, 4.7, -11.66);
       win.material = this.palette.clubhouseGlass;
       win.freezeWorldMatrix();
     }
-    for (let cx = -21; cx <= 5; cx += 6.5) {
-      const col = MeshBuilder.CreateBox(`clubhouse_col_${cx}`, { width: 0.45, height: 5.6, depth: 0.5 }, this.scene);
-      col.position = new Vector3(cx, 2.8, -10.6);
+    for (let cx = -22; cx <= 7; cx += 5.8) {
+      const col = MeshBuilder.CreateBox(`clubhouse_col_${cx}`, { width: 0.42, height: 6.2, depth: 0.48 }, this.scene);
+      col.position = new Vector3(cx, 3.1, -9.9);
       col.material = this.palette.dugoutFrame;
       col.freezeWorldMatrix();
     }
 
-    const roof = MeshBuilder.CreateBox('clubhouse_roof', { width: 29.6, height: 0.45, depth: 9.8 }, this.scene);
-    roof.position = new Vector3(-8, 5.8, -14.3);
+    const roof = MeshBuilder.CreateBox('clubhouse_roof', { width: 31.6, height: 0.48, depth: 10.4 }, this.scene);
+    roof.position = new Vector3(-7.5, 6.32, -14.2);
+    roof.rotation.x = 0.08;
     roof.material = this.palette.turfShoeSole;
     roof.freezeWorldMatrix();
+
+    // Matte organic perimeter treeline clusters behind back boundary (Scottish park ground feel, zero shiny balls)
+    for (let tx = -34; tx <= 34; tx += 5.5) {
+      if (tx > -22 && tx < 9) continue;
+      const tz = -12.5 - (Math.abs(tx) % 3);
+      const trunk = MeshBuilder.CreateCylinder(`tree_tr_${tx}`, { height: 2.6, diameter: 0.42 }, this.scene);
+      trunk.position = new Vector3(tx, 1.3, tz);
+      trunk.material = this.palette.woodBench;
+      trunk.freezeWorldMatrix();
+
+      const offsets = [
+        [0, 3.8, 0, 3.2, 2.5],
+        [-1.1, 3.3, 0.5, 2.4, 2.0],
+        [1.1, 3.4, -0.4, 2.5, 2.1],
+        [0.2, 4.9, 0.1, 2.2, 1.8],
+      ];
+      for (let p = 0; p < offsets.length; p += 1) {
+        const [ox, oy, oz, w, h] = offsets[p];
+        const puff = MeshBuilder.CreateSphere(`tree_can_${tx}_${p}`, { diameterX: w, diameterY: h, diameterZ: w * 0.9, segments: 8 }, this.scene);
+        puff.position = new Vector3(tx + ox, oy, tz + oz);
+        puff.material = this.palette.foliageMatte;
+        puff.freezeWorldMatrix();
+      }
+    }
 
     // 6 Floodlight Towers
     const towerCoords = [

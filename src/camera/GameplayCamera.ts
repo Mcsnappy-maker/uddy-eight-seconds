@@ -41,13 +41,13 @@ export class GameplayCamera {
     let desiredTarget: Vector3;
 
     if (this.mode === 'athlete_closeup') {
-      // Close inspection of hands gripping J-hook stick, jersey weave, face, socks, and turf shoes
-      desiredPos = new Vector3(attackerPos.x - 1.65, 1.05, attackerPos.z - 2.15);
-      desiredTarget = new Vector3(attackerPos.x, 0.82, attackerPos.z);
+      // Front-right 3/4 inspection showing full head/face, hair, two-handed separated grip on carbon stick, kit, socks, and turf shoes
+      desiredPos = new Vector3(attackerPos.x - 1.35, 1.02, attackerPos.z - 2.75);
+      desiredTarget = new Vector3(attackerPos.x, 0.88, attackerPos.z + 0.05);
     } else if (this.mode === 'keeper_closeup') {
-      // Close inspection of field-hockey keeper helmet, chest smock, rectangular leg guards, kickers, blocker & stick
-      desiredPos = new Vector3(keeperPos.x - 0.95, 1.02, keeperPos.z + 2.75);
-      desiredTarget = new Vector3(keeperPos.x, 0.88, keeperPos.z);
+      // Unobstructed front-quarter close-up of human face inside helmet cage, fitted smock, leg guards, kickers, flat left blocker & stick
+      desiredPos = new Vector3(keeperPos.x - 0.85, 1.04, keeperPos.z + 2.55);
+      desiredTarget = new Vector3(keeperPos.x, 0.90, keeperPos.z);
     } else if (this.mode === 'broadcast_gantry') {
       // Uddy TV elevated sideline view
       desiredPos = new Vector3(17.5, 6.2, 11.5);

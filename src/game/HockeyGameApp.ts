@@ -3,6 +3,7 @@ import {
   Mesh,
   MeshBuilder,
   Scene,
+  SceneInstrumentation,
 } from '@babylonjs/core';
 import {
   ControlScheme,
@@ -34,7 +35,8 @@ import { EncounterHUD } from '../ui/EncounterHUD';
 export interface BenchmarkSample {
   backend: RendererBackend;
   gpuAdapter: string;
-  resolution: { width: number; height: number; dpr: number };
+  userAgent: string;
+  resolution: { width: number; height: number; dpr: number; hardwareScaling: number };
   qualityTier: QualityTier;
   lightingPreset: LightingPreset;
   frameCount: number;
@@ -44,6 +46,16 @@ export interface BenchmarkSample {
   p99FrameMs: number;
   maxFrameMs: number;
   stallsOver50ms: number;
+  activeRenderWorkMs: {
+    avg: number;
+    p50: number;
+    p95: number;
+    p99: number;
+  };
+  characterAssetStats: {
+    attacker: { meshes: number; vertices: number; bones: number };
+    keeper: { meshes: number; vertices: number; bones: number };
+  };
   jsHeapMB: number | null;
 }
 
@@ -96,6 +108,8 @@ export class HockeyGameApp {
 
   // Frame-time ring buffer for live telemetry & automated benchmark
   private readonly recentFrameMs: number[] = [];
+  private readonly recentRenderWorkMs: number[] = [];
+  private sceneInstrumentation!: SceneInstrumentation;
   private lastFrameTimestamp = performance.now();
   private lastHudTelemetryMs = 0;
 
@@ -155,12 +169,19 @@ export class HockeyGameApp {
     this.hud.syncBackendSelection(this.backend);
 
     this.scene = new Scene(this.engine);
+    this.sceneInstrumentation = new SceneInstrumentation(this.scene);
+    this.sceneInstrumentation.captureFrameTime = true;
+
     this.palette = createMaterialPalette(this.scene);
     this.venue = new VenueScene(this.scene, this.palette);
     this.cameraCtrl = new GameplayCamera(this.scene);
 
-    this.attackerRig = new AttackerVisualRig(this.palette, this.scene, this.venue.shadowGenerator ?? undefined);
-    this.keeperRig = new KeeperVisualRig(this.palette, this.scene, this.venue.shadowGenerator ?? undefined);
+    this.attackerRig = new AttackerVisualRig(this.palette, this.scene);
+    this.keeperRig = new KeeperVisualRig(this.palette, this.scene);
+    await Promise.all([
+      this.attackerRig.loadAsync(this.scene, this.venue.shadowGenerator ?? undefined),
+      this.keeperRig.loadAsync(this.scene, this.venue.shadowGenerator ?? undefined),
+    ]);
 
     this.ballMesh = MeshBuilder.CreateSphere(
       'hockey_ball',
@@ -322,8 +343,15 @@ export class HockeyGameApp {
   private tick(dt: number, frameMs: number, nowMs: number): void {
     this.totalTime += dt;
     this.recentFrameMs.push(frameMs);
-    if (this.recentFrameMs.length > 360) {
+    if (this.recentFrameMs.length > 480) {
       this.recentFrameMs.shift();
+    }
+    const workMs = this.sceneInstrumentation.frameTimeCounter.lastSecAverage || this.sceneInstrumentation.frameTimeCounter.current;
+    if (workMs > 0) {
+      this.recentRenderWorkMs.push(workMs);
+      if (this.recentRenderWorkMs.length > 480) {
+        this.recentRenderWorkMs.shift();
+      }
     }
 
     if (nowMs - this.lastHudTelemetryMs > 300) {
@@ -615,29 +643,46 @@ export class HockeyGameApp {
       },
       resetFrameStats: () => {
         this.recentFrameMs.length = 0;
+        this.recentRenderWorkMs.length = 0;
       },
       getBenchmarkSummary: (): BenchmarkSample => {
         const sorted = [...this.recentFrameMs].sort((a, b) => a - b);
-        const pct = (p: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] ?? 0;
+        const pct = (arr: number[], p: number) => arr[Math.min(arr.length - 1, Math.floor(arr.length * p))] ?? 0;
         const avgMs = sorted.length ? sorted.reduce((a, b) => a + b, 0) / sorted.length : 16.67;
+
+        const sortedWork = [...this.recentRenderWorkMs].sort((a, b) => a - b);
+        const avgWork = sortedWork.length ? sortedWork.reduce((a, b) => a + b, 0) / sortedWork.length : 0;
+
         const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
         return {
           backend: this.backend,
           gpuAdapter: this.gpuAdapterInfo,
+          userAgent: navigator.userAgent,
           resolution: {
             width: this.engine.getRenderWidth(),
             height: this.engine.getRenderHeight(),
             dpr: window.devicePixelRatio || 1,
+            hardwareScaling: this.engine.getHardwareScalingLevel(),
           },
           qualityTier: this.qualityTier,
           lightingPreset: this.lightingPreset,
           frameCount: sorted.length,
           avgFps: Number((1000 / Math.max(0.1, avgMs)).toFixed(2)),
-          p50FrameMs: Number(pct(0.5).toFixed(2)),
-          p95FrameMs: Number(pct(0.95).toFixed(2)),
-          p99FrameMs: Number(pct(0.99).toFixed(2)),
+          p50FrameMs: Number(pct(sorted, 0.5).toFixed(2)),
+          p95FrameMs: Number(pct(sorted, 0.95).toFixed(2)),
+          p99FrameMs: Number(pct(sorted, 0.99).toFixed(2)),
           maxFrameMs: Number((sorted[sorted.length - 1] ?? 0).toFixed(2)),
           stallsOver50ms: sorted.filter((ms) => ms > 50).length,
+          activeRenderWorkMs: {
+            avg: Number(avgWork.toFixed(2)),
+            p50: Number(pct(sortedWork, 0.5).toFixed(2)),
+            p95: Number(pct(sortedWork, 0.95).toFixed(2)),
+            p99: Number(pct(sortedWork, 0.99).toFixed(2)),
+          },
+          characterAssetStats: {
+            attacker: this.attackerRig.getTriangleStats(),
+            keeper: this.keeperRig.getTriangleStats(),
+          },
           jsHeapMB: mem ? Number((mem.usedJSHeapSize / (1024 * 1024)).toFixed(2)) : null,
         };
       },

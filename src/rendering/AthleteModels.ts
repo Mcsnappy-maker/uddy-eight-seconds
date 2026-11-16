@@ -1,13 +1,15 @@
 import {
   Matrix,
   Mesh,
-  MeshBuilder,
+  Node,
   Quaternion,
   Scene,
+  SceneLoader,
   ShadowGenerator,
   TransformNode,
   Vector3,
 } from '@babylonjs/core';
+import '@babylonjs/loaders/glTF';
 import { OrientedBoxCollider } from '../simulation/PhysicsWorld';
 import { MaterialPalette } from './PBRMaterials';
 
@@ -24,478 +26,279 @@ export type KeeperPoseMode =
   | 'save_stick_sweep'
   | 'recover';
 
-function registerShadows(meshes: Mesh[], shadowGen?: ShadowGenerator): void {
+interface BoneRestInfo {
+  node: TransformNode;
+  parentName: string | null;
+  restLocalPos: Vector3;
+  restLocalQuat: Quaternion;
+  restModelQuat: Quaternion;
+  restModelPos: Vector3;
+}
+
+/**
+ * Wraps a loaded 53-bone glTF skeleton so bones can be posed cleanly in uniform
+ * character-model space (+X = character left, +Y = up, +Z = forward) regardless of
+ * MakeHuman's internal per-bone roll axes or Babylon's __root__ LH/RH transform.
+ */
+class SkinnedGltfRig {
+  public readonly gltfRoot: TransformNode;
+  public readonly meshes: Mesh[] = [];
+  public readonly bones = new Map<string, BoneRestInfo>();
+  private readonly orderedNames: string[] = [];
+  private readonly currentModelQuat = new Map<string, Quaternion>();
+  private readonly currentModelPos = new Map<string, Vector3>();
+
+  constructor(gltfRoot: TransformNode, meshes: Mesh[]) {
+    this.gltfRoot = gltfRoot;
+    this.meshes = meshes;
+
+    // Collect TransformNodes under gltfRoot that belong to skeleton bones
+    const nodeByName = new Map<string, TransformNode>();
+    const collect = (n: Node) => {
+      if (n instanceof TransformNode && !(n instanceof Mesh)) {
+        nodeByName.set(n.name, n);
+      }
+      for (const c of n.getChildren()) {
+        collect(c);
+      }
+    };
+    collect(gltfRoot);
+
+    // Traverse top-down starting from 'Root' (or skeleton hierarchy)
+    const visit = (tn: TransformNode, parentBoneName: string | null, pModelPos: Vector3, pModelQuat: Quaternion) => {
+      const localPos = tn.position.clone();
+      const localQuat = tn.rotationQuaternion ? tn.rotationQuaternion.clone() : Quaternion.FromEulerVector(tn.rotation);
+      tn.rotationQuaternion = localQuat.clone();
+
+      const rotatedOffset = new Vector3();
+      localPos.rotateByQuaternionToRef(pModelQuat, rotatedOffset);
+      const mPos = pModelPos.add(rotatedOffset);
+      const mQuat = pModelQuat.multiply(localQuat).normalize();
+
+      this.orderedNames.push(tn.name);
+      this.bones.set(tn.name, {
+        node: tn,
+        parentName: parentBoneName,
+        restLocalPos: localPos,
+        restLocalQuat: localQuat,
+        restModelPos: mPos,
+        restModelQuat: mQuat,
+      });
+      this.currentModelPos.set(tn.name, mPos.clone());
+      this.currentModelQuat.set(tn.name, mQuat.clone());
+
+      for (const child of tn.getChildren()) {
+        if (child instanceof TransformNode && !(child instanceof Mesh)) {
+          visit(child, tn.name, mPos, mQuat);
+        }
+      }
+    };
+
+    const rootBone = nodeByName.get('Root');
+    if (rootBone) {
+      visit(rootBone, null, Vector3.Zero(), Quaternion.Identity());
+    } else {
+      // Fallback: find armature root
+      for (const child of gltfRoot.getChildren()) {
+        if (child instanceof TransformNode && !(child instanceof Mesh)) {
+          visit(child, null, Vector3.Zero(), Quaternion.Identity());
+        }
+      }
+    }
+  }
+
+  public getMeshTriangleStats(): { meshes: number; vertices: number; bones: number } {
+    let vertices = 0;
+    for (const m of this.meshes) {
+      vertices += m.getTotalVertices();
+    }
+    return { meshes: this.meshes.length, vertices, bones: this.bones.size };
+  }
+
+  /**
+   * Resets pose to rest, then applies hierarchical joint deltas (propagating parent rotations
+   * through pelvis -> spine -> head and thigh -> calf -> foot) OR absolute model-space orientations
+   * (for IK-solved limb segments).
+   */
+  public applyModelSpacePose(
+    jointDeltas: Record<string, Quaternion>,
+    absModelDeltas: Record<string, Quaternion>,
+    pelvisOffset?: Vector3,
+  ): void {
+    for (const name of this.orderedNames) {
+      const info = this.bones.get(name)!;
+      const pQuat = info.parentName ? this.currentModelQuat.get(info.parentName)! : Quaternion.Identity();
+      const pPos = info.parentName ? this.currentModelPos.get(info.parentName)! : Vector3.Zero();
+
+      const offsetLocal =
+        name === 'pelvis' && pelvisOffset
+          ? info.restLocalPos.add(pelvisOffset)
+          : info.restLocalPos;
+
+      const rotOffset = new Vector3();
+      offsetLocal.rotateByQuaternionToRef(pQuat, rotOffset);
+      const mPos = pPos.add(rotOffset);
+
+      const baseModelQuat = pQuat.multiply(info.restLocalQuat).normalize();
+      let targetModelQuat = baseModelQuat;
+      if (absModelDeltas[name]) {
+        targetModelQuat = absModelDeltas[name].multiply(info.restModelQuat).normalize();
+      } else if (jointDeltas[name]) {
+        targetModelQuat = jointDeltas[name].multiply(baseModelQuat).normalize();
+      }
+
+      const invParent = Quaternion.Inverse(pQuat);
+      const newLocalQuat = invParent.multiply(targetModelQuat).normalize();
+
+      info.node.position.copyFrom(offsetLocal);
+      info.node.rotationQuaternion!.copyFrom(newLocalQuat);
+      this.currentModelPos.set(name, mPos);
+      this.currentModelQuat.set(name, targetModelQuat);
+    }
+  }
+
+  public getModelPos(boneName: string): Vector3 {
+    return (this.currentModelPos.get(boneName) ?? Vector3.Zero()).clone();
+  }
+
+  public getRestModelPos(boneName: string): Vector3 {
+    return (this.bones.get(boneName)?.restModelPos ?? Vector3.Zero()).clone();
+  }
+
+  /**
+   * Solves two-bone limb IK in character-model space (+X left, +Y up, +Z forward)
+   * and inserts upper + lower bone delta quaternions into rotDeltas.
+   */
+  public solveLimbToModelTarget(
+    upperBone: string,
+    lowerBone: string,
+    endBone: string,
+    targetModelPos: Vector3,
+    poleHintModel: Vector3,
+    rotDeltas: Record<string, Quaternion>,
+  ): void {
+    const shPos = this.getModelPos(upperBone);
+    const elRest = this.getRestModelPos(lowerBone);
+    const shRest = this.getRestModelPos(upperBone);
+    const endRest = this.getRestModelPos(endBone);
+
+    const restUpperVec = elRest.subtract(shRest);
+    const restForeVec = endRest.subtract(elRest);
+    const upperLen = Math.max(0.05, restUpperVec.length());
+    const foreLen = Math.max(0.05, restForeVec.length());
+
+    const toTarget = targetModelPos.subtract(shPos);
+    const rawDist = toTarget.length();
+    const maxReach = upperLen + foreLen - 0.008;
+    const minReach = Math.abs(upperLen - foreLen) + 0.02;
+    const dist = Math.max(minReach, Math.min(maxReach, rawDist));
+    const dir = rawDist > 1e-5 ? toTarget.scale(1 / rawDist) : new Vector3(0, -1, 0);
+
+    const cosSh = Math.max(
+      -1,
+      Math.min(1, (upperLen * upperLen + dist * dist - foreLen * foreLen) / (2 * upperLen * dist)),
+    );
+    const sinSh = Math.sqrt(Math.max(0, 1 - cosSh * cosSh));
+
+    const proj = dir.scale(Vector3.Dot(poleHintModel, dir));
+    let bendAxis = poleHintModel.subtract(proj);
+    if (bendAxis.lengthSquared() < 1e-6) {
+      bendAxis = new Vector3(0, 0, -1);
+    } else {
+      bendAxis.normalize();
+    }
+
+    const upperDir = dir.scale(cosSh).add(bendAxis.scale(sinSh)).normalize();
+    const elbowTarget = shPos.add(upperDir.scale(upperLen));
+    const foreDir = targetModelPos.subtract(elbowTarget).normalize();
+
+    const qUpper = new Quaternion();
+    Quaternion.FromUnitVectorsToRef(restUpperVec.normalize(), upperDir, qUpper);
+    const qFore = new Quaternion();
+    Quaternion.FromUnitVectorsToRef(restForeVec.normalize(), foreDir, qFore);
+
+    rotDeltas[upperBone] = qUpper;
+    rotDeltas[lowerBone] = qFore;
+  }
+}
+
+function registerGltfShadows(meshes: Mesh[], shadowGen?: ShadowGenerator): void {
   for (const m of meshes) {
     m.receiveShadows = true;
-    if (shadowGen) {
+    if (shadowGen && m.getTotalVertices() > 0) {
       shadowGen.addShadowCaster(m, false);
     }
   }
 }
 
-/**
- * Builds one continuous tapered field-hockey stick (grip handle -> carbon shaft -> curved J-hook)
- * with zero seams or gaps, flattened along Z to represent the flat left playing face.
- */
-function buildFieldHockeyStick(
-  name: string,
-  lengthM: number,
-  palette: MaterialPalette,
+async function loadCharacterGltf(
+  filename: string,
   scene: Scene,
-  parent: TransformNode,
-  meshesOut: Mesh[],
-): TransformNode {
-  const stickRoot = new TransformNode(`${name}_stickRoot`, scene);
-  stickRoot.parent = parent;
-
-  const shaftEnd = -(lengthM - 0.14);
-  const path = [
-    new Vector3(0, 0, 0),
-    new Vector3(0, -0.34, 0),
-    new Vector3(0, shaftEnd, 0),
-    new Vector3(-0.012, -lengthM + 0.08, 0.02),
-    new Vector3(-0.036, -lengthM + 0.036, 0.055),
-    new Vector3(-0.072, -lengthM + 0.025, 0.095),
-    new Vector3(-0.104, -lengthM + 0.042, 0.112),
-    new Vector3(-0.122, -lengthM + 0.072, 0.102),
-  ];
-
-  const stickTube = MeshBuilder.CreateTube(
-    `${name}_stick_body`,
-    {
-      path,
-      tessellation: 14,
-      cap: Mesh.CAP_ALL,
-      radiusFunction: (i) => {
-        if (i <= 1) return 0.0145;
-        if (i === 2) return 0.016;
-        return 0.019;
-      },
-    },
-    scene,
-  );
-  stickTube.scaling = new Vector3(1.0, 1.0, 0.68);
-  stickTube.material = palette.stickCarbon;
-  stickTube.parent = stickRoot;
-  meshesOut.push(stickTube);
-
-  const grip = MeshBuilder.CreateCylinder(
-    `${name}_grip`,
-    { height: 0.36, diameterTop: 0.032, diameterBottom: 0.029, tessellation: 14 },
-    scene,
-  );
-  grip.position.y = -0.18;
-  grip.scaling = new Vector3(1.0, 1.0, 0.85);
-  grip.material = palette.stickGrip;
-  grip.parent = stickRoot;
-  meshesOut.push(grip);
-
-  return stickRoot;
-}
-
-/**
- * Solves a clean 2-bone analytical IK in parent space so the athlete's hands
- * land directly on the stick grip points across every locomotion/swing pose.
- */
-function solveTwoBoneArmIK(
-  shoulderPos: Vector3,
-  targetPos: Vector3,
-  upperLen: number,
-  foreLen: number,
-  poleHint: Vector3,
-  shoulderNode: TransformNode,
-  elbowNode: TransformNode,
-): void {
-  const toTarget = targetPos.subtract(shoulderPos);
-  const rawDist = toTarget.length();
-  const maxReach = upperLen + foreLen - 0.008;
-  const minReach = Math.abs(upperLen - foreLen) + 0.02;
-  const dist = Math.max(minReach, Math.min(maxReach, rawDist));
-  const dir = rawDist > 1e-5 ? toTarget.scale(1 / rawDist) : new Vector3(0, -1, 0);
-
-  // Law of cosines for shoulder angle & elbow angle
-  const cosShoulder = Math.max(
-    -1,
-    Math.min(1, (upperLen * upperLen + dist * dist - foreLen * foreLen) / (2 * upperLen * dist)),
-  );
-  const sinShoulder = Math.sqrt(Math.max(0, 1 - cosShoulder * cosShoulder));
-
-  // Orthonormal bend plane toward poleHint (outward/backward elbow hint)
-  const proj = dir.scale(Vector3.Dot(poleHint, dir));
-  let bendAxis = poleHint.subtract(proj);
-  if (bendAxis.lengthSquared() < 1e-6) {
-    bendAxis = new Vector3(0, 0, -1);
-  } else {
-    bendAxis.normalize();
-  }
-
-  const upperDir = dir.scale(cosShoulder).add(bendAxis.scale(sinShoulder)).normalize();
-  const elbowWorld = shoulderPos.add(upperDir.scale(upperLen));
-  const foreDir = targetPos.subtract(elbowWorld).normalize();
-
-  // Align -Y of shoulderNode along upperDir
-  const down = new Vector3(0, -1, 0);
-  const shQuat = Quaternion.FromUnitVectorsToRef(down, upperDir, new Quaternion());
-  shoulderNode.rotationQuaternion = shQuat;
-
-  // Compute foreDir in shoulderNode local space and align -Y of elbowNode along it
-  const invSh = shQuat.clone().conjugate();
-  const foreLocal = new Vector3();
-  foreDir.rotateByQuaternionToRef(invSh, foreLocal);
-  foreLocal.normalize();
-  const elQuat = Quaternion.FromUnitVectorsToRef(down, foreLocal, new Quaternion());
-  elbowNode.rotationQuaternion = elQuat;
+  parentRoot: TransformNode,
+  shadowGen?: ShadowGenerator,
+): Promise<SkinnedGltfRig> {
+  const res = await SceneLoader.ImportMeshAsync(null, './assets/models/', filename, scene);
+  const gltfRoot = res.meshes[0] as TransformNode;
+  gltfRoot.parent = parentRoot;
+  const meshes = res.meshes.filter((m): m is Mesh => m instanceof Mesh && m.getTotalVertices() > 0);
+  registerGltfShadows(meshes, shadowGen);
+  return new SkinnedGltfRig(gltfRoot, meshes);
 }
 
 export class AttackerVisualRig {
   public readonly root: TransformNode;
-  private readonly hips: TransformNode;
-  private readonly torso: TransformNode;
-  private readonly headPivot: TransformNode;
-  private readonly leftUpperLeg: TransformNode;
-  private readonly leftLowerLeg: TransformNode;
-  private readonly rightUpperLeg: TransformNode;
-  private readonly rightLowerLeg: TransformNode;
-  private readonly leftUpperArm: TransformNode;
-  private readonly leftForearm: TransformNode;
-  private readonly rightUpperArm: TransformNode;
-  private readonly rightForearm: TransformNode;
-  private readonly stickPivot: TransformNode;
-  private readonly meshes: Mesh[] = [];
+  private variantARig: SkinnedGltfRig | null = null;
+  private variantBRig: SkinnedGltfRig | null = null;
+  private activeVariant: AttackerVariant = 'variant_a';
+  private stickNodeA: TransformNode | null = null;
+  private stickNodeB: TransformNode | null = null;
 
-  private readonly variantAJersey;
-  private readonly variantBJersey;
-  private readonly skinLight;
-  private readonly skinRich;
-  private readonly headMesh: Mesh;
-  private readonly neckMesh: Mesh;
-  private readonly noseMesh: Mesh;
-  private readonly leftHandMesh: Mesh;
-  private readonly rightHandMesh: Mesh;
-  private readonly torsoMesh: Mesh;
-  private readonly chestPadMesh: Mesh;
-  private readonly leftSleeveMesh: Mesh;
-  private readonly rightSleeveMesh: Mesh;
-  private readonly skinParts: Mesh[] = [];
-
-  private readonly upperArmLen = 0.27;
-  private readonly forearmLen = 0.25;
-  private readonly leftShoulderLocal = new Vector3(-0.195, 0.43, 0.01);
-  private readonly rightShoulderLocal = new Vector3(0.195, 0.43, 0.01);
-
-  constructor(palette: MaterialPalette, scene: Scene, shadowGen?: ShadowGenerator) {
-    this.variantAJersey = palette.jerseyAttackerA;
-    this.variantBJersey = palette.jerseyAttackerB;
-    this.skinLight = palette.skinLightWarm;
-    this.skinRich = palette.skinRichBrown;
-
+  constructor(_palette: MaterialPalette, scene: Scene) {
     this.root = new TransformNode('attacker_root', scene);
-    this.hips = new TransformNode('attacker_hips', scene);
-    this.hips.parent = this.root;
-    this.hips.position = new Vector3(0, 0.9, 0);
+  }
 
-    // Sculpted Athletic Pelvis / Shorts Waistband (non-boxy)
-    const pelvis = MeshBuilder.CreateCylinder(
-      'att_pelvis',
-      { height: 0.19, diameterTop: 0.31, diameterBottom: 0.34, tessellation: 18 },
-      scene,
-    );
-    pelvis.scaling = new Vector3(1.02, 1.0, 0.7);
-    pelvis.material = palette.shortsDarkBlue;
-    pelvis.parent = this.hips;
-    this.meshes.push(pelvis);
+  public async loadAsync(scene: Scene, shadowGen?: ShadowGenerator): Promise<void> {
+    const [rigA, rigB, stickResA, stickResB] = await Promise.all([
+      loadCharacterGltf('uddy_attacker_a.glb', scene, this.root, shadowGen),
+      loadCharacterGltf('uddy_attacker_b.glb', scene, this.root, shadowGen),
+      SceneLoader.ImportMeshAsync(null, './assets/models/', 'uddy_stick.glb', scene),
+      SceneLoader.ImportMeshAsync(null, './assets/models/', 'uddy_stick.glb', scene),
+    ]);
 
-    const hipCap = MeshBuilder.CreateSphere(
-      'att_hip_cap',
-      { diameterX: 0.34, diameterY: 0.16, diameterZ: 0.23, segments: 12 },
-      scene,
-    );
-    hipCap.position.y = -0.05;
-    hipCap.material = palette.shortsDarkBlue;
-    hipCap.parent = this.hips;
-    this.meshes.push(hipCap);
+    this.variantARig = rigA;
+    this.variantBRig = rigB;
 
-    // Sculpted Athletic Torso
-    this.torso = new TransformNode('att_torso_pivot', scene);
-    this.torso.parent = this.hips;
-    this.torso.position = new Vector3(0, 0.08, 0);
-
-    this.torsoMesh = MeshBuilder.CreateCylinder(
-      'att_torso',
-      { height: 0.49, diameterTop: 0.39, diameterBottom: 0.3, tessellation: 18 },
-      scene,
-    );
-    this.torsoMesh.position.y = 0.245;
-    this.torsoMesh.scaling = new Vector3(1.04, 1.0, 0.68);
-    this.torsoMesh.material = this.variantAJersey;
-    this.torsoMesh.parent = this.torso;
-    this.meshes.push(this.torsoMesh);
-
-    this.chestPadMesh = MeshBuilder.CreateSphere(
-      'att_chest_contour',
-      { diameterX: 0.38, diameterY: 0.28, diameterZ: 0.24, segments: 12 },
-      scene,
-    );
-    this.chestPadMesh.position = new Vector3(0, 0.33, 0.015);
-    this.chestPadMesh.material = this.variantAJersey;
-    this.chestPadMesh.parent = this.torso;
-    this.meshes.push(this.chestPadMesh);
-
-    // Head, Jaw, Nose, Eyes & Hair
-    this.headPivot = new TransformNode('att_head_pivot', scene);
-    this.headPivot.parent = this.torso;
-    this.headPivot.position = new Vector3(0, 0.5, 0.02);
-
-    this.neckMesh = MeshBuilder.CreateCylinder(
-      'att_neck',
-      { height: 0.11, diameterTop: 0.095, diameterBottom: 0.11, tessellation: 14 },
-      scene,
-    );
-    this.neckMesh.position.y = 0.04;
-    this.neckMesh.material = this.skinLight;
-    this.neckMesh.parent = this.headPivot;
-    this.meshes.push(this.neckMesh);
-
-    this.headMesh = MeshBuilder.CreateSphere(
-      'att_head',
-      { diameterX: 0.185, diameterY: 0.23, diameterZ: 0.205, segments: 16 },
-      scene,
-    );
-    this.headMesh.position.y = 0.175;
-    this.headMesh.material = this.skinLight;
-    this.headMesh.parent = this.headPivot;
-    this.meshes.push(this.headMesh);
-
-    this.noseMesh = MeshBuilder.CreateBox('att_nose', { width: 0.022, height: 0.042, depth: 0.028 }, scene);
-    this.noseMesh.position = new Vector3(0, 0.165, 0.104);
-    this.noseMesh.rotation.x = -0.25;
-    this.noseMesh.material = this.skinLight;
-    this.noseMesh.parent = this.headPivot;
-    this.meshes.push(this.noseMesh);
-
-    const hair = MeshBuilder.CreateSphere(
-      'att_hair',
-      { diameterX: 0.198, diameterY: 0.175, diameterZ: 0.215, segments: 14 },
-      scene,
-    );
-    hair.position = new Vector3(0, 0.225, -0.02);
-    hair.material = palette.hairDark;
-    hair.parent = this.headPivot;
-    this.meshes.push(hair);
-
-    for (const side of [-1, 1]) {
-      const sclera = MeshBuilder.CreateSphere(`att_sclera_${side}`, { diameter: 0.024, segments: 8 }, scene);
-      sclera.position = new Vector3(side * 0.036, 0.19, 0.092);
-      sclera.material = palette.eyeWhite;
-      sclera.parent = this.headPivot;
-      this.meshes.push(sclera);
-
-      const pupil = MeshBuilder.CreateSphere(`att_eye_${side}`, { diameter: 0.014, segments: 8 }, scene);
-      pupil.position = new Vector3(side * 0.036, 0.19, 0.101);
-      pupil.material = palette.hairDark;
-      pupil.parent = this.headPivot;
-      this.meshes.push(pupil);
-    }
-
-    // Contoured Legs + Hooped Socks + Multi-part Sculpted Turf Shoes
-    const buildLeg = (side: -1 | 1, label: string) => {
-      const hipJ = new TransformNode(`att_${label}_hip`, scene);
-      hipJ.parent = this.hips;
-      hipJ.position = new Vector3(side * 0.105, -0.04, 0);
-
-      const shortsLeg = MeshBuilder.CreateCylinder(
-        `att_${label}_shorts_cuff`,
-        { height: 0.24, diameterTop: 0.165, diameterBottom: 0.145, tessellation: 14 },
-        scene,
-      );
-      shortsLeg.position.y = -0.11;
-      shortsLeg.material = palette.shortsDarkBlue;
-      shortsLeg.parent = hipJ;
-      this.meshes.push(shortsLeg);
-
-      const lowerThigh = MeshBuilder.CreateCylinder(
-        `att_${label}_thigh_skin`,
-        { height: 0.21, diameterTop: 0.132, diameterBottom: 0.112, tessellation: 14 },
-        scene,
-      );
-      lowerThigh.position.y = -0.31;
-      lowerThigh.material = this.skinLight;
-      lowerThigh.parent = hipJ;
-      this.meshes.push(lowerThigh);
-      this.skinParts.push(lowerThigh);
-
-      const kneeJ = new TransformNode(`att_${label}_knee`, scene);
-      kneeJ.parent = hipJ;
-      kneeJ.position = new Vector3(0, -0.415, 0);
-
-      const kneeCap = MeshBuilder.CreateSphere(`att_${label}_knee_cap`, { diameter: 0.112, segments: 10 }, scene);
-      kneeCap.material = this.skinLight;
-      kneeCap.parent = kneeJ;
-      this.meshes.push(kneeCap);
-      this.skinParts.push(kneeCap);
-
-      const shin = MeshBuilder.CreateCylinder(
-        `att_${label}_shin`,
-        { height: 0.38, diameterTop: 0.116, diameterBottom: 0.086, tessellation: 14 },
-        scene,
-      );
-      shin.position.y = -0.195;
-      shin.material = palette.socksHooped;
-      shin.parent = kneeJ;
-      this.meshes.push(shin);
-
-      // Sculpted Turf Shoe (rounded toe + heel cup + gold flash + studded sole)
-      const shoeHeel = MeshBuilder.CreateCapsule(
-        `att_${label}_shoe_heel`,
-        { height: 0.19, radius: 0.046, tessellation: 10 },
-        scene,
-      );
-      shoeHeel.rotation.x = Math.PI * 0.5;
-      shoeHeel.position = new Vector3(0, -0.395, 0.03);
-      shoeHeel.scaling = new Vector3(1.0, 1.0, 0.85);
-      shoeHeel.material = palette.turfShoeUpper;
-      shoeHeel.parent = kneeJ;
-      this.meshes.push(shoeHeel);
-
-      const shoeStripe = MeshBuilder.CreateBox(
-        `att_${label}_shoe_stripe`,
-        { width: 0.098, height: 0.018, depth: 0.12 },
-        scene,
-      );
-      shoeStripe.position = new Vector3(0, -0.392, 0.02);
-      shoeStripe.material = palette.turfShoeAccent;
-      shoeStripe.parent = kneeJ;
-      this.meshes.push(shoeStripe);
-
-      const shoeSole = MeshBuilder.CreateCapsule(
-        `att_${label}_sole`,
-        { height: 0.25, radius: 0.049, tessellation: 10 },
-        scene,
-      );
-      shoeSole.rotation.x = Math.PI * 0.5;
-      shoeSole.position = new Vector3(0, -0.43, 0.04);
-      shoeSole.scaling = new Vector3(1.06, 1.0, 0.35);
-      shoeSole.material = palette.turfShoeSole;
-      shoeSole.parent = kneeJ;
-      this.meshes.push(shoeSole);
-
-      return { hipJ, kneeJ };
+    // Parent sticks directly inside each character's gltfRoot so coordinates match 1:1 in model space
+    const setupStick = (res: Awaited<ReturnType<typeof SceneLoader.ImportMeshAsync>>, parentGltf: TransformNode) => {
+      const stickRoot = new TransformNode('att_stick_model_space', scene);
+      stickRoot.parent = parentGltf;
+      // Undo Babylon __root__ conversion on imported stick child meshes by parenting raw stick nodes
+      const importedRoot = res.meshes[0] as TransformNode;
+      for (const c of [...importedRoot.getChildren()]) {
+        c.parent = stickRoot;
+      }
+      importedRoot.dispose();
+      const sMeshes = res.meshes.filter((m): m is Mesh => m instanceof Mesh && m.getTotalVertices() > 0);
+      registerGltfShadows(sMeshes, shadowGen);
+      return stickRoot;
     };
 
-    const leftLeg = buildLeg(-1, 'L');
-    const rightLeg = buildLeg(1, 'R');
-    this.leftUpperLeg = leftLeg.hipJ;
-    this.leftLowerLeg = leftLeg.kneeJ;
-    this.rightUpperLeg = rightLeg.hipJ;
-    this.rightLowerLeg = rightLeg.kneeJ;
+    this.stickNodeA = setupStick(stickResA, rigA.gltfRoot);
+    this.stickNodeB = setupStick(stickResB, rigB.gltfRoot);
 
-    // Articulated Arms with Rounded Shoulders, Forearms & Sculpted Hands
-    const buildArm = (label: string, shPos: Vector3) => {
-      const shJ = new TransformNode(`att_${label}_sh`, scene);
-      shJ.parent = this.torso;
-      shJ.position.copyFrom(shPos);
-
-      const shoulderCap = MeshBuilder.CreateSphere(`att_${label}_shcap`, { diameter: 0.125, segments: 10 }, scene);
-      shoulderCap.material = this.variantAJersey;
-      shoulderCap.parent = shJ;
-      this.meshes.push(shoulderCap);
-
-      const sleeve = MeshBuilder.CreateCylinder(
-        `att_${label}_sleeve`,
-        { height: 0.16, diameterTop: 0.115, diameterBottom: 0.098, tessellation: 12 },
-        scene,
-      );
-      sleeve.position.y = -0.075;
-      sleeve.material = this.variantAJersey;
-      sleeve.parent = shJ;
-      this.meshes.push(sleeve);
-
-      const uArm = MeshBuilder.CreateCylinder(
-        `att_${label}_uarm`,
-        { height: 0.14, diameterTop: 0.09, diameterBottom: 0.078, tessellation: 12 },
-        scene,
-      );
-      uArm.position.y = -0.205;
-      uArm.material = this.skinLight;
-      uArm.parent = shJ;
-      this.meshes.push(uArm);
-      this.skinParts.push(uArm);
-
-      const elbowJ = new TransformNode(`att_${label}_elbow`, scene);
-      elbowJ.parent = shJ;
-      elbowJ.position = new Vector3(0, -this.upperArmLen, 0);
-
-      const elbowCap = MeshBuilder.CreateSphere(`att_${label}_elcap`, { diameter: 0.078, segments: 8 }, scene);
-      elbowCap.material = this.skinLight;
-      elbowCap.parent = elbowJ;
-      this.meshes.push(elbowCap);
-      this.skinParts.push(elbowCap);
-
-      const fArm = MeshBuilder.CreateCylinder(
-        `att_${label}_farm`,
-        { height: this.forearmLen, diameterTop: 0.078, diameterBottom: 0.062, tessellation: 12 },
-        scene,
-      );
-      fArm.position.y = -this.forearmLen * 0.5;
-      fArm.material = this.skinLight;
-      fArm.parent = elbowJ;
-      this.meshes.push(fArm);
-      this.skinParts.push(fArm);
-
-      const hand = MeshBuilder.CreateSphere(
-        `att_${label}_hand`,
-        { diameterX: 0.056, diameterY: 0.072, diameterZ: 0.062, segments: 10 },
-        scene,
-      );
-      hand.position.y = -this.forearmLen - 0.01;
-      hand.material = this.skinLight;
-      hand.parent = elbowJ;
-      this.meshes.push(hand);
-
-      return { shJ, elbowJ, sleeve, hand, shoulderCap };
-    };
-
-    const leftArm = buildArm('L', this.leftShoulderLocal);
-    const rightArm = buildArm('R', this.rightShoulderLocal);
-    this.leftUpperArm = leftArm.shJ;
-    this.leftForearm = leftArm.elbowJ;
-    this.rightUpperArm = rightArm.shJ;
-    this.rightForearm = rightArm.elbowJ;
-    this.leftSleeveMesh = leftArm.sleeve;
-    this.rightSleeveMesh = rightArm.sleeve;
-    this.leftHandMesh = leftArm.hand;
-    this.rightHandMesh = rightArm.hand;
-    this.meshes.push(leftArm.shoulderCap, rightArm.shoulderCap);
-
-    // Field-hockey stick parented to torso, with analytical IK locking BOTH hands onto its grip!
-    this.stickPivot = new TransformNode('att_stick_pivot', scene);
-    this.stickPivot.parent = this.torso;
-    this.stickPivot.position = new Vector3(0.08, 0.14, 0.25);
-    buildFieldHockeyStick('att', 0.94, palette, scene, this.stickPivot, this.meshes);
-
-    registerShadows(this.meshes, shadowGen);
+    this.setVariant(this.activeVariant);
     this.updateAnimation(0, 0, 0, 0, 0);
   }
 
+  public getTriangleStats(): { meshes: number; vertices: number; bones: number } {
+    const rig = this.activeVariant === 'variant_a' ? this.variantARig : this.variantBRig;
+    return rig ? rig.getMeshTriangleStats() : { meshes: 0, vertices: 0, bones: 0 };
+  }
+
   public setVariant(variant: AttackerVariant): void {
-    const jersey = variant === 'variant_a' ? this.variantAJersey : this.variantBJersey;
-    const skin = variant === 'variant_a' ? this.skinLight : this.skinRich;
-    this.torsoMesh.material = jersey;
-    this.chestPadMesh.material = jersey;
-    this.leftSleeveMesh.material = jersey;
-    this.rightSleeveMesh.material = jersey;
-    for (const m of this.meshes) {
-      if (m.name.includes('_shcap')) m.material = jersey;
-    }
-    this.headMesh.material = skin;
-    this.neckMesh.material = skin;
-    this.noseMesh.material = skin;
-    this.leftHandMesh.material = skin;
-    this.rightHandMesh.material = skin;
-    for (const sp of this.skinParts) {
-      sp.material = skin;
-    }
-    this.root.scaling = variant === 'variant_a' ? new Vector3(1, 1, 1) : new Vector3(0.97, 0.96, 0.97);
+    this.activeVariant = variant;
+    if (this.variantARig) this.variantARig.gltfRoot.setEnabled(variant === 'variant_a');
+    if (this.variantBRig) this.variantBRig.gltfRoot.setEnabled(variant === 'variant_b');
   }
 
   public updateAnimation(
@@ -505,454 +308,239 @@ export class AttackerVisualRig {
     swing01: number,
     feintLateral: number,
   ): void {
-    const speedFactor = Math.min(1, speedMps / 7.5);
-    const strideAmp = 0.62 * speedFactor;
+    const rig = this.activeVariant === 'variant_a' ? this.variantARig : this.variantBRig;
+    const stickNode = this.activeVariant === 'variant_a' ? this.stickNodeA : this.stickNodeB;
+    if (!rig || !stickNode) return;
 
-    // Athletic forward hockey crouch
-    const crouchY = 0.86 - 0.045 * speedFactor - 0.035 * charge01;
-    this.hips.position.y = crouchY + Math.abs(Math.sin(walkPhase)) * 0.025 * speedFactor;
-    this.hips.rotation.z = feintLateral * -0.12;
-    this.torso.rotation.x = 0.26 + 0.11 * speedFactor + 0.12 * charge01;
-    this.torso.rotation.y = -0.32 * charge01 + 0.52 * Math.sin(swing01 * Math.PI);
-    this.headPivot.rotation.x = -0.22;
+    const speedFactor = Math.min(1, speedMps / 7.2);
+    const stride = Math.sin(walkPhase) * 0.56 * speedFactor;
+    const lKneeBend = Math.max(0.24, 0.36 + Math.max(0, -Math.sin(walkPhase)) * 0.65 * speedFactor);
+    const rKneeBend = Math.max(0.24, 0.36 + Math.max(0, Math.sin(walkPhase)) * 0.65 * speedFactor);
 
-    const lHip = Math.sin(walkPhase) * strideAmp;
-    const rHip = -Math.sin(walkPhase) * strideAmp;
-    this.leftUpperLeg.rotation.x = -0.26 + lHip;
-    this.leftLowerLeg.rotation.x = 0.4 + Math.max(0, -lHip) * 0.68;
-    this.rightUpperLeg.rotation.x = -0.26 + rHip;
-    this.rightLowerLeg.rotation.x = 0.4 + Math.max(0, -rHip) * 0.68;
+    const torsoTwist = -0.36 * charge01 + 0.58 * Math.sin(swing01 * Math.PI) + feintLateral * 0.16;
+    const torsoLean = 0.54 + 0.10 * speedFactor + 0.08 * charge01;
 
-    const backswing = charge01 * 0.78;
-    const followThrough = Math.sin(swing01 * Math.PI) * 1.1;
-    const stickPitch = -0.28 - backswing + followThrough;
+    // 1. Hierarchical forward hockey crouch: +X rotation bends +Y spine FORWARD (+Z), head counter-tilts -X to keep eyes on goal!
+    const jointDeltas: Record<string, Quaternion> = {
+      pelvis: Quaternion.RotationYawPitchRoll(torsoTwist * 0.25, 0.12, feintLateral * -0.05),
+      spine_01: Quaternion.RotationYawPitchRoll(torsoTwist * 0.25, torsoLean * 0.34, 0),
+      spine_02: Quaternion.RotationYawPitchRoll(torsoTwist * 0.25, torsoLean * 0.34, 0),
+      spine_03: Quaternion.RotationYawPitchRoll(torsoTwist * 0.35, torsoLean * 0.32, 0),
+      neck_01: Quaternion.RotationYawPitchRoll(-torsoTwist * 0.4, -torsoLean * 0.42, 0),
+      head: Quaternion.RotationYawPitchRoll(-torsoTwist * 0.4, -torsoLean * 0.52, 0),
+      thigh_l: Quaternion.RotationAxis(new Vector3(1, 0, 0), -0.40 + stride),
+      calf_l: Quaternion.RotationAxis(new Vector3(1, 0, 0), lKneeBend),
+      foot_l: Quaternion.RotationAxis(new Vector3(1, 0, 0), -lKneeBend * 0.35),
+      thigh_r: Quaternion.RotationAxis(new Vector3(1, 0, 0), -0.35 - stride),
+      calf_r: Quaternion.RotationAxis(new Vector3(1, 0, 0), rKneeBend),
+      foot_r: Quaternion.RotationAxis(new Vector3(1, 0, 0), -rKneeBend * 0.35),
+    };
+    const absDeltas: Record<string, Quaternion> = {};
 
-    this.stickPivot.position = new Vector3(0.11 + feintLateral * 0.06, 0.09, 0.25);
-    this.stickPivot.rotation.set(stickPitch, 0.08 - charge01 * 0.35 + followThrough * 0.3, -0.16 + feintLateral * 0.2);
+    const pelvisDrop = new Vector3(0, -0.09 - 0.04 * speedFactor - 0.03 * charge01 + Math.abs(Math.sin(walkPhase)) * 0.025 * speedFactor, 0);
+    rig.applyModelSpacePose(jointDeltas, absDeltas, pelvisDrop);
 
-    // Compute exact local torso-space points along the stick grip so BOTH hands grip the stick cleanly!
-    const stickRotMatrix = Matrix.RotationYawPitchRoll(
-      this.stickPivot.rotation.y,
-      this.stickPivot.rotation.x,
-      this.stickPivot.rotation.z,
+    // 2. True two-handed hockey stick grip with clear ~0.34m hand separation & stick head near the turf!
+    const swingFwd = Math.sin(swing01 * Math.PI) * 0.42 - charge01 * 0.36;
+    const topGripTarget = new Vector3(
+      0.06 + feintLateral * 0.07 - charge01 * 0.14 + Math.sin(swing01 * Math.PI) * 0.16,
+      0.92 + charge01 * 0.10,
+      0.34 + swingFwd * 0.25,
     );
-    const topGripOffset = Vector3.TransformCoordinates(new Vector3(0, -0.06, 0), stickRotMatrix);
-    const midGripOffset = Vector3.TransformCoordinates(new Vector3(0, -0.26, 0), stickRotMatrix);
 
-    const leftGripInTorso = this.stickPivot.position.add(topGripOffset);
-    const rightGripInTorso = this.stickPivot.position.add(midGripOffset);
+    const lowGripTarget = new Vector3(
+      -0.14 + feintLateral * 0.11 - charge01 * 0.18 + Math.sin(swing01 * Math.PI) * 0.24,
+      0.62 + charge01 * 0.20,
+      0.42 + swingFwd * 0.45,
+    );
 
-    solveTwoBoneArmIK(
-      this.leftShoulderLocal,
-      leftGripInTorso,
-      this.upperArmLen,
-      this.forearmLen,
-      new Vector3(-0.6, -0.1, -0.8),
-      this.leftUpperArm,
-      this.leftForearm,
+    // Solve two-bone IK in absolute model space for both arms onto separated grip points
+    rig.solveLimbToModelTarget(
+      'upperarm_l',
+      'lowerarm_l',
+      'hand_l',
+      topGripTarget,
+      new Vector3(0.75, -0.25, -0.6),
+      absDeltas,
     );
-    solveTwoBoneArmIK(
-      this.rightShoulderLocal,
-      rightGripInTorso,
-      this.upperArmLen,
-      this.forearmLen,
-      new Vector3(0.65, -0.1, -0.8),
-      this.rightUpperArm,
-      this.rightForearm,
+    rig.solveLimbToModelTarget(
+      'upperarm_r',
+      'lowerarm_r',
+      'hand_r',
+      lowGripTarget,
+      new Vector3(-0.75, -0.25, -0.6),
+      absDeltas,
     );
+
+    // Curl fingers inward around the handle (local +X bends fingers forward/inward into palm)
+    const curlL = Quaternion.RotationAxis(new Vector3(0, 0, 1), -1.25).multiply(Quaternion.RotationAxis(new Vector3(1, 0, 0), 0.45));
+    const curlR = Quaternion.RotationAxis(new Vector3(0, 0, 1), 1.25).multiply(Quaternion.RotationAxis(new Vector3(1, 0, 0), 0.45));
+    for (const prefix of ['index', 'middle', 'ring', 'pinky']) {
+      jointDeltas[`${prefix}_01_l`] = curlL;
+      jointDeltas[`${prefix}_02_l`] = curlL;
+      jointDeltas[`${prefix}_01_r`] = curlR;
+      jointDeltas[`${prefix}_02_r`] = curlR;
+    }
+
+    rig.applyModelSpacePose(jointDeltas, absDeltas, pelvisDrop);
+
+    // 3. Snap carbon field-hockey stick handle directly onto hand_l palm and aim straight through hand_r palm!
+    const actualLeftHand = rig.getModelPos('hand_l');
+    const actualRightHand = rig.getModelPos('hand_r');
+    const shaftVec = actualRightHand.subtract(actualLeftHand);
+    const shaftDir = shaftVec.lengthSquared() > 1e-5 ? shaftVec.normalize() : new Vector3(-0.42, -0.88, 0.22).normalize();
+
+    // Stick local axis is (0, -1, 0) from top grip (0,0,0) down to J-hook, with flat playing face pointing +Z.
+    stickNode.position.copyFrom(actualLeftHand);
+    const qStick = new Quaternion();
+    Quaternion.FromUnitVectorsToRef(new Vector3(0, -1, 0), shaftDir, qStick);
+    stickNode.rotationQuaternion = qStick;
   }
 }
 
 export class KeeperVisualRig {
   public readonly root: TransformNode;
-  private readonly pelvis: TransformNode;
-  private readonly torso: TransformNode;
-  private readonly leftLegPivot: TransformNode;
-  private readonly rightLegPivot: TransformNode;
-  private readonly leftArmPivot: TransformNode;
-  private readonly rightArmPivot: TransformNode;
-  private readonly leftKickerMesh: Mesh;
-  private readonly rightKickerMesh: Mesh;
-  private readonly leftLegGuardMesh: Mesh;
-  private readonly rightLegGuardMesh: Mesh;
-  private readonly leftBlockerMesh: Mesh;
-  private readonly torsoArmourMesh: Mesh;
-  private readonly helmetMesh: Mesh;
-  private readonly stickBladeMesh: Mesh;
-  private readonly meshes: Mesh[] = [];
+  private gltfRig: SkinnedGltfRig | null = null;
+  private stickNode: TransformNode | null = null;
+  private headColliderNode: TransformNode | null = null;
+  private torsoColliderNode: TransformNode | null = null;
+  private leftFootColliderNode: TransformNode | null = null;
+  private rightFootColliderNode: TransformNode | null = null;
+  private leftCalfColliderNode: TransformNode | null = null;
+  private rightCalfColliderNode: TransformNode | null = null;
+  private leftHandColliderNode: TransformNode | null = null;
+  private rightHandColliderNode: TransformNode | null = null;
 
-  constructor(palette: MaterialPalette, scene: Scene, shadowGen?: ShadowGenerator) {
+  constructor(_palette: MaterialPalette, scene: Scene) {
     this.root = new TransformNode('keeper_root', scene);
-    this.pelvis = new TransformNode('keeper_pelvis', scene);
-    this.pelvis.parent = this.root;
-    this.pelvis.position = new Vector3(0, 0.88, 0);
+  }
 
-    // Contoured Padded Goalkeeper Girdle / Shorts (non-boxy)
-    const girdle = MeshBuilder.CreateCylinder(
-      'gk_girdle',
-      { height: 0.24, diameterTop: 0.39, diameterBottom: 0.42, tessellation: 18 },
-      scene,
-    );
-    girdle.scaling = new Vector3(1.05, 1.0, 0.72);
-    girdle.material = palette.shortsDarkBlue;
-    girdle.parent = this.pelvis;
-    this.meshes.push(girdle);
+  public async loadAsync(scene: Scene, shadowGen?: ShadowGenerator): Promise<void> {
+    const [rig, stickRes] = await Promise.all([
+      loadCharacterGltf('uddy_goalkeeper.glb', scene, this.root, shadowGen),
+      SceneLoader.ImportMeshAsync(null, './assets/models/', 'uddy_stick.glb', scene),
+    ]);
+    this.gltfRig = rig;
 
-    // Sculpted Padded Torso & Chest Armour
-    this.torso = new TransformNode('gk_torso_pivot', scene);
-    this.torso.parent = this.pelvis;
-    this.torso.position = new Vector3(0, 0.1, 0);
-
-    this.torsoArmourMesh = MeshBuilder.CreateCylinder(
-      'gk_torso_armour',
-      { height: 0.51, diameterTop: 0.47, diameterBottom: 0.37, tessellation: 18 },
-      scene,
-    );
-    this.torsoArmourMesh.position.y = 0.255;
-    this.torsoArmourMesh.scaling = new Vector3(1.06, 1.0, 0.68);
-    this.torsoArmourMesh.material = palette.jerseyKeeper;
-    this.torsoArmourMesh.parent = this.torso;
-    this.meshes.push(this.torsoArmourMesh);
-
-    // Flat beveled front chest-bib protector plate (replaces bulging capsules)
-    const chestPlate = MeshBuilder.CreateCylinder(
-      'gk_chest_plate',
-      { height: 0.42, diameterTop: 0.36, diameterBottom: 0.28, tessellation: 8 },
-      scene,
-    );
-    chestPlate.position = new Vector3(0, 0.26, 0.085);
-    chestPlate.scaling = new Vector3(1.0, 1.0, 0.32);
-    chestPlate.material = palette.keeperFoamPanel;
-    chestPlate.parent = this.torso;
-    this.meshes.push(chestPlate);
-
-    for (const side of [-1, 1]) {
-      // Rounded shoulder Pauldron Caps
-      const shCap = MeshBuilder.CreateSphere(
-        `gk_shpad_${side}`,
-        { diameterX: 0.18, diameterY: 0.15, diameterZ: 0.21, segments: 12 },
-        scene,
-      );
-      shCap.position = new Vector3(side * 0.265, 0.46, 0.0);
-      shCap.material = palette.keeperFoamPanel;
-      shCap.parent = this.torso;
-      this.meshes.push(shCap);
+    const stickRoot = new TransformNode('gk_stick_model_space', scene);
+    stickRoot.parent = rig.gltfRoot;
+    const importedRoot = stickRes.meshes[0] as TransformNode;
+    for (const c of [...importedRoot.getChildren()]) {
+      c.parent = stickRoot;
     }
+    importedRoot.dispose();
+    const sMeshes = stickRes.meshes.filter((m): m is Mesh => m instanceof Mesh && m.getTotalVertices() > 0);
+    registerGltfShadows(sMeshes, shadowGen);
+    this.stickNode = stickRoot;
 
-    // Neck + Field-Hockey Helmet Shell + Visor Peak + Chin Guard + Curved Steel Face Cage
-    const neck = MeshBuilder.CreateCylinder('gk_neck', { height: 0.11, diameter: 0.135, tessellation: 14 }, scene);
-    neck.position = new Vector3(0, 0.54, 0.02);
-    neck.material = palette.keeperGloveDark;
-    neck.parent = this.torso;
-    this.meshes.push(neck);
+    // Bind collider reference nodes straight to animated skeleton bones
+    this.headColliderNode = rig.bones.get('head')?.node ?? null;
+    this.torsoColliderNode = rig.bones.get('spine_02')?.node ?? null;
+    this.leftFootColliderNode = rig.bones.get('foot_l')?.node ?? null;
+    this.rightFootColliderNode = rig.bones.get('foot_r')?.node ?? null;
+    this.leftCalfColliderNode = rig.bones.get('calf_l')?.node ?? null;
+    this.rightCalfColliderNode = rig.bones.get('calf_r')?.node ?? null;
+    this.leftHandColliderNode = rig.bones.get('hand_l')?.node ?? null;
+    this.rightHandColliderNode = rig.bones.get('hand_r')?.node ?? null;
 
-    const innerHead = MeshBuilder.CreateSphere(
-      'gk_inner_head',
-      { diameterX: 0.175, diameterY: 0.205, diameterZ: 0.185, segments: 14 },
-      scene,
-    );
-    innerHead.position = new Vector3(0, 0.69, 0.03);
-    innerHead.material = palette.skinLightWarm;
-    innerHead.parent = this.torso;
-    this.meshes.push(innerHead);
-
-    for (const side of [-1, 1]) {
-      const eye = MeshBuilder.CreateSphere(`gk_eye_${side}`, { diameter: 0.02, segments: 8 }, scene);
-      eye.position = new Vector3(side * 0.034, 0.70, 0.118);
-      eye.material = palette.hairDark;
-      eye.parent = this.torso;
-      this.meshes.push(eye);
-    }
-
-    this.helmetMesh = MeshBuilder.CreateSphere(
-      'gk_helmet_shell',
-      { diameterX: 0.24, diameterY: 0.26, diameterZ: 0.28, segments: 16 },
-      scene,
-    );
-    this.helmetMesh.position = new Vector3(0, 0.70, -0.005);
-    this.helmetMesh.material = palette.keeperHelmetShell;
-    this.helmetMesh.parent = this.torso;
-    this.meshes.push(this.helmetMesh);
-
-    const helmetBrow = MeshBuilder.CreateCapsule(
-      'gk_helmet_brow',
-      { height: 0.22, radius: 0.032, tessellation: 10 },
-      scene,
-    );
-    helmetBrow.rotation.z = Math.PI * 0.5;
-    helmetBrow.position = new Vector3(0, 0.77, 0.115);
-    helmetBrow.material = palette.turfShoeAccent;
-    helmetBrow.parent = this.torso;
-    this.meshes.push(helmetBrow);
-
-    const chinCup = MeshBuilder.CreateCapsule(
-      'gk_helmet_chin',
-      { height: 0.15, radius: 0.035, tessellation: 10 },
-      scene,
-    );
-    chinCup.rotation.z = Math.PI * 0.5;
-    chinCup.position = new Vector3(0, 0.585, 0.115);
-    chinCup.material = palette.keeperHelmetShell;
-    chinCup.parent = this.torso;
-    this.meshes.push(chinCup);
-
-    // Curved Steel Wire Face Cage
-    for (let i = -2; i <= 2; i += 1) {
-      const vBar = MeshBuilder.CreateCylinder(
-        `gk_cage_v_${i}`,
-        { height: 0.165, diameter: 0.007, tessellation: 6 },
-        scene,
-      );
-      vBar.position = new Vector3(i * 0.026, 0.675, 0.152 - Math.abs(i) * 0.011);
-      vBar.material = palette.keeperCageMetal;
-      vBar.parent = this.torso;
-      this.meshes.push(vBar);
-    }
-    for (const hOff of [-0.042, 0, 0.042]) {
-      const hBar = MeshBuilder.CreateCylinder(
-        `gk_cage_h_${hOff}`,
-        { height: 0.125, diameter: 0.007, tessellation: 6 },
-        scene,
-      );
-      hBar.rotation.z = Math.PI * 0.5;
-      hBar.position = new Vector3(0, 0.675 + hOff, 0.15);
-      hBar.material = palette.keeperCageMetal;
-      hBar.parent = this.torso;
-      this.meshes.push(hBar);
-    }
-
-    // Authentic Contoured Outdoor Field-Hockey Leg Guards + Strapped Foam Kickers over Turf Soles (NO SKATES!)
-    const buildKeeperLeg = (side: -1 | 1, label: string) => {
-      const legPivot = new TransformNode(`gk_${label}_leg`, scene);
-      legPivot.parent = this.pelvis;
-      legPivot.position = new Vector3(side * 0.15, -0.06, 0);
-
-      const thigh = MeshBuilder.CreateCylinder(
-        `gk_${label}_thigh`,
-        { height: 0.34, diameterTop: 0.175, diameterBottom: 0.145, tessellation: 14 },
-        scene,
-      );
-      thigh.position.y = -0.17;
-      thigh.material = palette.shortsDarkBlue;
-      thigh.parent = legPivot;
-      this.meshes.push(thigh);
-
-      // Curved contoured front foam leg guard
-      const legGuard = MeshBuilder.CreateCylinder(
-        `gk_${label}_legguard`,
-        { height: 0.56, diameterTop: 0.195, diameterBottom: 0.175, tessellation: 14 },
-        scene,
-      );
-      legGuard.position = new Vector3(0, -0.44, 0.068);
-      legGuard.scaling = new Vector3(1.06, 1.0, 0.66);
-      legGuard.material = palette.keeperFoamPanel;
-      legGuard.parent = legPivot;
-      this.meshes.push(legGuard);
-
-      // Raised chamfered knee-roll bolster + inner pad wing
-      const kneeRoll = MeshBuilder.CreateCapsule(
-        `gk_${label}_kneeroll`,
-        { height: 0.18, radius: 0.052, tessellation: 10 },
-        scene,
-      );
-      kneeRoll.rotation.z = Math.PI * 0.5;
-      kneeRoll.position = new Vector3(0, -0.19, 0.095);
-      kneeRoll.material = palette.keeperFoamPanel;
-      kneeRoll.parent = legPivot;
-      this.meshes.push(kneeRoll);
-
-      // Calf straps
-      for (const sy of [-0.32, -0.54]) {
-        const strap = MeshBuilder.CreateCylinder(
-          `gk_${label}_strap_${sy}`,
-          { height: 0.03, diameter: 0.16, tessellation: 12 },
-          scene,
-        );
-        strap.position = new Vector3(0, sy, 0.02);
-        strap.material = palette.keeperStrap;
-        strap.parent = legPivot;
-        this.meshes.push(strap);
-      }
-
-      // Sculpted Foam Kicker enclosing turf shoe (rounded toe + padded bridge + turf sole underneath)
-      const kicker = MeshBuilder.CreateCapsule(
-        `gk_${label}_kicker`,
-        { height: 0.32, radius: 0.088, tessellation: 12 },
-        scene,
-      );
-      kicker.rotation.x = Math.PI * 0.5;
-      kicker.position = new Vector3(0, -0.735, 0.09);
-      kicker.scaling = new Vector3(1.0, 1.0, 0.9);
-      kicker.material = palette.keeperKicker;
-      kicker.parent = legPivot;
-      this.meshes.push(kicker);
-
-      const turfSole = MeshBuilder.CreateCapsule(
-        `gk_${label}_turfsole`,
-        { height: 0.28, radius: 0.068, tessellation: 10 },
-        scene,
-      );
-      turfSole.rotation.x = Math.PI * 0.5;
-      turfSole.position = new Vector3(0, -0.808, 0.085);
-      turfSole.scaling = new Vector3(1.05, 1.0, 0.32);
-      turfSole.material = palette.turfShoeSole;
-      turfSole.parent = legPivot;
-      this.meshes.push(turfSole);
-
-      return { legPivot, legGuard, kicker };
-    };
-
-    const leftLeg = buildKeeperLeg(-1, 'L');
-    const rightLeg = buildKeeperLeg(1, 'R');
-    this.leftLegPivot = leftLeg.legPivot;
-    this.rightLegPivot = rightLeg.legPivot;
-    this.leftLegGuardMesh = leftLeg.legGuard;
-    this.rightLegGuardMesh = rightLeg.legGuard;
-    this.leftKickerMesh = leftLeg.kicker;
-    this.rightKickerMesh = rightLeg.kicker;
-
-    // LEFT ARM (-X in keeper local frame): Sculpted Beveled Rectangular Field-Hockey Hand Protector / Blocker
-    this.leftArmPivot = new TransformNode('gk_L_arm', scene);
-    this.leftArmPivot.parent = this.torso;
-    this.leftArmPivot.position = new Vector3(-0.28, 0.42, 0.02);
-
-    const lSleeve = MeshBuilder.CreateCylinder(
-      'gk_L_sleeve',
-      { height: 0.26, diameterTop: 0.135, diameterBottom: 0.105, tessellation: 12 },
-      scene,
-    );
-    lSleeve.position.y = -0.13;
-    lSleeve.material = palette.jerseyKeeper;
-    lSleeve.parent = this.leftArmPivot;
-    this.meshes.push(lSleeve);
-
-    const lForearm = MeshBuilder.CreateCylinder(
-      'gk_L_forearm',
-      { height: 0.23, diameterTop: 0.12, diameterBottom: 0.105, tessellation: 12 },
-      scene,
-    );
-    lForearm.position = new Vector3(0, -0.32, 0.075);
-    lForearm.rotation.x = -0.55;
-    lForearm.material = palette.keeperGloveDark;
-    lForearm.parent = this.leftArmPivot;
-    this.meshes.push(lForearm);
-
-    this.leftBlockerMesh = MeshBuilder.CreateCylinder(
-      'gk_left_blocker',
-      { height: 0.31, diameterTop: 0.21, diameterBottom: 0.21, tessellation: 8 },
-      scene,
-    );
-    this.leftBlockerMesh.scaling = new Vector3(1.0, 1.0, 0.32);
-    this.leftBlockerMesh.position = new Vector3(-0.04, -0.41, 0.19);
-    this.leftBlockerMesh.material = palette.keeperFoamPanel;
-    this.leftBlockerMesh.parent = this.leftArmPivot;
-    this.meshes.push(this.leftBlockerMesh);
-
-    const blockerTopRoll = MeshBuilder.CreateCapsule(
-      'gk_blocker_top',
-      { height: 0.2, radius: 0.036, tessellation: 8 },
-      scene,
-    );
-    blockerTopRoll.rotation.z = Math.PI * 0.5;
-    blockerTopRoll.position = new Vector3(-0.04, -0.255, 0.19);
-    blockerTopRoll.material = palette.keeperFoamPanel;
-    blockerTopRoll.parent = this.leftArmPivot;
-    this.meshes.push(blockerTopRoll);
-
-    // RIGHT ARM (+X in keeper local frame): Contoured Stick Glove Gripping True Field-Hockey Stick
-    this.rightArmPivot = new TransformNode('gk_R_arm', scene);
-    this.rightArmPivot.parent = this.torso;
-    this.rightArmPivot.position = new Vector3(0.28, 0.42, 0.02);
-
-    const rSleeve = MeshBuilder.CreateCylinder(
-      'gk_R_sleeve',
-      { height: 0.26, diameterTop: 0.135, diameterBottom: 0.105, tessellation: 12 },
-      scene,
-    );
-    rSleeve.position.y = -0.13;
-    rSleeve.material = palette.jerseyKeeper;
-    rSleeve.parent = this.rightArmPivot;
-    this.meshes.push(rSleeve);
-
-    const rForearm = MeshBuilder.CreateCylinder(
-      'gk_R_forearm',
-      { height: 0.22, diameterTop: 0.115, diameterBottom: 0.098, tessellation: 12 },
-      scene,
-    );
-    rForearm.position = new Vector3(0.01, -0.32, 0.07);
-    rForearm.rotation.x = -0.5;
-    rForearm.material = palette.keeperGloveDark;
-    rForearm.parent = this.rightArmPivot;
-    this.meshes.push(rForearm);
-
-    const rStickGlove = MeshBuilder.CreateCapsule(
-      'gk_right_stickglove',
-      { height: 0.18, radius: 0.072, tessellation: 10 },
-      scene,
-    );
-    rStickGlove.position = new Vector3(0.03, -0.41, 0.145);
-    rStickGlove.material = palette.keeperGloveDark;
-    rStickGlove.parent = this.rightArmPivot;
-    this.meshes.push(rStickGlove);
-
-    // Position stick handle right inside rStickGlove!
-    const stickPivot = new TransformNode('gk_stick_holder', scene);
-    stickPivot.parent = this.rightArmPivot;
-    stickPivot.position = new Vector3(0.03, -0.34, 0.15);
-    stickPivot.rotation.set(-0.18, 0, -0.3);
-    buildFieldHockeyStick('gk', 0.96, palette, scene, stickPivot, this.meshes);
-
-    this.stickBladeMesh = MeshBuilder.CreateBox(
-      'gk_stick_hitbox_ref',
-      { width: 0.06, height: 0.48, depth: 0.08 },
-      scene,
-    );
-    this.stickBladeMesh.isVisible = false;
-    this.stickBladeMesh.position = new Vector3(-0.08, -0.7, 0.08);
-    this.stickBladeMesh.parent = stickPivot;
-
-    registerShadows(this.meshes, shadowGen);
     this.updatePose('ready', 0, 0);
   }
 
+  public getTriangleStats(): { meshes: number; vertices: number; bones: number } {
+    return this.gltfRig ? this.gltfRig.getMeshTriangleStats() : { meshes: 0, vertices: 0, bones: 0 };
+  }
+
   public updatePose(pose: KeeperPoseMode, progress01: number, lateralPhase: number): void {
+    if (!this.gltfRig || !this.stickNode) return;
+    const rig = this.gltfRig;
     const p = Math.sin(progress01 * Math.PI);
-    const shuffleBob = Math.abs(Math.sin(lateralPhase)) * 0.04;
+    const shuffleBob = Math.abs(Math.sin(lateralPhase)) * 0.035;
 
-    this.pelvis.position.y = 0.85 - shuffleBob;
-    this.pelvis.rotation.z = 0;
-    this.torso.rotation.x = 0.22;
-    this.torso.rotation.z = 0;
-
-    this.leftLegPivot.rotation.set(0, 0, 0.12);
-    this.rightLegPivot.rotation.set(0, 0, -0.12);
-    this.leftArmPivot.rotation.set(-0.25, 0, 0.28);
-    this.rightArmPivot.rotation.set(-0.2, 0, -0.24);
+    let dropY = -0.11 - shuffleBob;
+    let bodyTiltZ = 0;
+    let lLegSpread = 0.16;
+    let rLegSpread = -0.16;
+    let lKnee = 0.42;
+    let rKnee = 0.42;
 
     if (pose === 'shuffle_left' || pose === 'shuffle_right') {
-      const s = Math.sin(lateralPhase) * 0.22;
-      this.leftLegPivot.rotation.z = 0.15 + Math.max(0, s);
-      this.rightLegPivot.rotation.z = -0.15 - Math.max(0, -s);
+      const s = Math.sin(lateralPhase) * 0.18;
+      lLegSpread += Math.max(0, s);
+      rLegSpread -= Math.max(0, -s);
     } else if (pose === 'save_low_left') {
-      this.pelvis.position.y = 0.85 - 0.34 * p;
-      this.pelvis.rotation.z = -0.28 * p;
-      this.leftLegPivot.rotation.z = 0.2 + 0.82 * p;
-      this.rightLegPivot.rotation.z = -0.15 - 0.35 * p;
-      this.leftArmPivot.rotation.z = 0.3 + 0.85 * p;
+      dropY -= 0.24 * p;
+      bodyTiltZ = 0.22 * p;
+      lLegSpread = 0.18 + 0.72 * p;
+      lKnee = 0.2 + 0.15 * p;
     } else if (pose === 'save_low_right') {
-      this.pelvis.position.y = 0.85 - 0.34 * p;
-      this.pelvis.rotation.z = 0.28 * p;
-      this.rightLegPivot.rotation.z = -0.2 - 0.82 * p;
-      this.leftLegPivot.rotation.z = 0.15 + 0.35 * p;
-      this.rightArmPivot.rotation.z = -0.3 - 0.9 * p;
-    } else if (pose === 'save_high_blocker') {
-      this.leftArmPivot.rotation.x = -0.25 - 1.4 * p;
-      this.leftArmPivot.rotation.z = 0.45 * p;
-    } else if (pose === 'save_stick_sweep') {
-      this.rightArmPivot.rotation.x = -0.5 - 0.6 * p;
-      this.rightArmPivot.rotation.z = -0.95 * p;
-      this.torso.rotation.z = 0.24 * p;
+      dropY -= 0.24 * p;
+      bodyTiltZ = -0.22 * p;
+      rLegSpread = -0.18 - 0.72 * p;
+      rKnee = 0.2 + 0.15 * p;
     }
+
+    const jointDeltas: Record<string, Quaternion> = {
+      pelvis: Quaternion.RotationYawPitchRoll(0, 0.12, bodyTiltZ),
+      spine_01: Quaternion.RotationAxis(new Vector3(1, 0, 0), 0.14),
+      spine_02: Quaternion.RotationAxis(new Vector3(1, 0, 0), 0.12),
+      head: Quaternion.RotationAxis(new Vector3(1, 0, 0), -0.30),
+      thigh_l: Quaternion.RotationYawPitchRoll(0, -0.36, lLegSpread),
+      calf_l: Quaternion.RotationYawPitchRoll(0, lKnee, 0),
+      foot_l: Quaternion.RotationAxis(new Vector3(1, 0, 0), -0.08),
+      thigh_r: Quaternion.RotationYawPitchRoll(0, -0.36, rLegSpread),
+      calf_r: Quaternion.RotationYawPitchRoll(0, rKnee, 0),
+      foot_r: Quaternion.RotationAxis(new Vector3(1, 0, 0), -0.08),
+    };
+    const absDeltas: Record<string, Quaternion> = {};
+
+    const pelvisDrop = new Vector3(0, dropY, 0);
+    rig.applyModelSpacePose(jointDeltas, absDeltas, pelvisDrop);
+
+    // Position Left-Hand Blocker out in ready defensive guard & Right-Hand Stick ready across low right side
+    const leftBlockerTarget = new Vector3(
+      0.34 + (pose === 'save_high_blocker' ? 0.28 * p : pose === 'save_low_left' ? 0.35 * p : 0),
+      1.02 + (pose === 'save_high_blocker' ? 0.48 * p : pose === 'save_low_left' ? -0.35 * p : 0),
+      0.34,
+    );
+    const rightStickHandTarget = new Vector3(
+      -0.32 - (pose === 'save_stick_sweep' ? 0.42 * p : pose === 'save_low_right' ? 0.32 * p : 0),
+      0.86 - (pose === 'save_low_right' ? 0.32 * p : 0),
+      0.32,
+    );
+
+    rig.solveLimbToModelTarget(
+      'upperarm_l',
+      'lowerarm_l',
+      'hand_l',
+      leftBlockerTarget,
+      new Vector3(0.7, -0.2, -0.6),
+      absDeltas,
+    );
+    rig.solveLimbToModelTarget(
+      'upperarm_r',
+      'lowerarm_r',
+      'hand_r',
+      rightStickHandTarget,
+      new Vector3(-0.7, -0.2, -0.6),
+      absDeltas,
+    );
+    // Tuck fingers neatly inside blocker/stick mit
+    const curlL = Quaternion.RotationAxis(new Vector3(0, 0, 1), -1.35);
+    const curlR = Quaternion.RotationAxis(new Vector3(0, 0, 1), 1.35);
+    for (const prefix of ['index', 'middle', 'ring', 'pinky']) {
+      jointDeltas[`${prefix}_01_l`] = curlL;
+      jointDeltas[`${prefix}_02_l`] = curlL;
+      jointDeltas[`${prefix}_01_r`] = curlR;
+      jointDeltas[`${prefix}_02_r`] = curlR;
+    }
+    rig.applyModelSpacePose(jointDeltas, absDeltas, pelvisDrop);
+
+    const rhPos = rig.getModelPos('hand_r');
+    this.stickNode.position.copyFrom(rhPos);
+    const stickDir = new Vector3(-0.22 - (pose === 'save_stick_sweep' ? 0.55 * p : 0), -0.92, 0.24).normalize();
+    const qStick = new Quaternion();
+    Quaternion.FromUnitVectorsToRef(new Vector3(0, -1, 0), stickDir, qStick);
+    this.stickNode.rotationQuaternion = qStick;
   }
 
   public getWorldEquipmentColliders(keeperVel: { x: number; y: number; z: number }): OrientedBoxCollider[] {
@@ -960,14 +548,20 @@ export class KeeperVisualRig {
     const yaw = this.root.rotation.y;
 
     const toBox = (
-      mesh: Mesh,
+      node: TransformNode | null,
+      fallbackOffset: Vector3,
       id: string,
       tag: OrientedBoxCollider['tag'],
       halfExtents: { x: number; y: number; z: number },
       restitution: number,
     ): OrientedBoxCollider => {
-      const m: Matrix = mesh.computeWorldMatrix(true);
-      const pos = Vector3.TransformCoordinates(Vector3.Zero(), m);
+      let pos: Vector3;
+      if (node) {
+        const m: Matrix = node.computeWorldMatrix(true);
+        pos = Vector3.TransformCoordinates(Vector3.Zero(), m);
+      } else {
+        pos = this.root.position.add(fallbackOffset);
+      }
       return {
         id,
         tag,
@@ -980,14 +574,14 @@ export class KeeperVisualRig {
     };
 
     return [
-      toBox(this.leftKickerMesh, 'gk_kicker_l', 'keeper_kicker', { x: 0.11, y: 0.095, z: 0.18 }, 0.62),
-      toBox(this.rightKickerMesh, 'gk_kicker_r', 'keeper_kicker', { x: 0.11, y: 0.095, z: 0.18 }, 0.62),
-      toBox(this.leftLegGuardMesh, 'gk_guard_l', 'keeper_pad', { x: 0.115, y: 0.29, z: 0.09 }, 0.48),
-      toBox(this.rightLegGuardMesh, 'gk_guard_r', 'keeper_pad', { x: 0.115, y: 0.29, z: 0.09 }, 0.48),
-      toBox(this.torsoArmourMesh, 'gk_torso', 'keeper_pad', { x: 0.25, y: 0.27, z: 0.16 }, 0.34),
-      toBox(this.leftBlockerMesh, 'gk_blocker', 'keeper_blocker', { x: 0.12, y: 0.165, z: 0.055 }, 0.54),
-      toBox(this.helmetMesh, 'gk_helmet', 'keeper_helmet', { x: 0.14, y: 0.14, z: 0.15 }, 0.42),
-      toBox(this.stickBladeMesh, 'gk_stick', 'keeper_stick', { x: 0.12, y: 0.28, z: 0.1 }, 0.66),
+      toBox(this.leftFootColliderNode, new Vector3(-0.2, 0.1, 0.1), 'gk_kicker_l', 'keeper_kicker', { x: 0.11, y: 0.1, z: 0.18 }, 0.62),
+      toBox(this.rightFootColliderNode, new Vector3(0.2, 0.1, 0.1), 'gk_kicker_r', 'keeper_kicker', { x: 0.11, y: 0.1, z: 0.18 }, 0.62),
+      toBox(this.leftCalfColliderNode, new Vector3(-0.2, 0.4, 0.08), 'gk_guard_l', 'keeper_pad', { x: 0.12, y: 0.28, z: 0.11 }, 0.48),
+      toBox(this.rightCalfColliderNode, new Vector3(0.2, 0.4, 0.08), 'gk_guard_r', 'keeper_pad', { x: 0.12, y: 0.28, z: 0.11 }, 0.48),
+      toBox(this.torsoColliderNode, new Vector3(0, 1.05, 0), 'gk_torso', 'keeper_pad', { x: 0.25, y: 0.28, z: 0.16 }, 0.34),
+      toBox(this.leftHandColliderNode, new Vector3(-0.35, 0.95, 0.2), 'gk_blocker', 'keeper_blocker', { x: 0.13, y: 0.17, z: 0.08 }, 0.54),
+      toBox(this.headColliderNode, new Vector3(0, 1.55, 0), 'gk_helmet', 'keeper_helmet', { x: 0.14, y: 0.15, z: 0.15 }, 0.42),
+      toBox(this.rightHandColliderNode, new Vector3(0.35, 0.55, 0.25), 'gk_stick', 'keeper_stick', { x: 0.14, y: 0.36, z: 0.14 }, 0.66),
     ];
   }
 }
