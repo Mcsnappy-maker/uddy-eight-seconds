@@ -331,7 +331,7 @@ export class EncounterHUD {
         </div>
       </aside>
 
-      <div class="attract-overlay" id="attract-overlay" role="dialog" aria-labelledby="setup-heading">
+      <div class="attract-overlay hidden" id="attract-overlay" role="dialog" aria-labelledby="setup-heading">
         <div class="setup-panel">
           <div class="setup-header">
             <img class="setup-crest" src="./assets/branding/uddingston_crest.png" alt="Uddingston Hockey Club crest" />
@@ -395,7 +395,7 @@ export class EncounterHUD {
 
           <div class="setup-actions" id="setup-actions-ready">
             <button class="hud-btn" id="btn-setup-title" type="button">Title screen</button>
-            <button class="primary-cta" id="btn-start-attempt" type="button">Start session</button>
+            <button class="primary-cta" id="btn-start-attempt" type="button" disabled>Start session</button>
           </div>
           <div class="setup-actions hidden" id="setup-actions-active">
             <button class="primary-cta" id="btn-unlock-setup" type="button">Restart to change setup</button>
@@ -833,6 +833,7 @@ export class EncounterHUD {
     (this.root.querySelector('#chk-dev-overlay') as HTMLInputElement).addEventListener('change', (e) => {
       this.setDevOverlayVisible((e.target as HTMLInputElement).checked);
     });
+    this.syncOverlayVisibility();
   }
 
   public clearActiveTouchPointers(): void {
