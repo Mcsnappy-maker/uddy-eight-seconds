@@ -178,10 +178,16 @@ export class EncounterHUD {
       <section class="title-screen" id="title-screen" aria-label="Start screen">
         <div class="title-hero-area">
           <div class="title-card">
-            <img class="title-crest" src="./assets/branding/uddingston_crest.png" alt="Uddingston Hockey Club castle crest" />
-            <div class="title-club">Uddingston Hockey Club</div>
-            <h1 class="title-heading">Uddy: Eight Seconds</h1>
-            <p class="title-sub">Outdoor field hockey shoot-out &amp; free practice</p>
+            <div class="title-identity">
+              <img class="title-crest" src="./assets/branding/uddingston_crest.png" alt="Uddingston Hockey Club castle crest" />
+              <div class="title-club"><span>Uddingston</span><span>Hockey Club</span></div>
+            </div>
+
+            <div class="title-copy">
+              <div class="title-eyebrow"><span class="title-eyebrow-rule" aria-hidden="true"></span>Outdoor field hockey</div>
+              <h1 class="title-heading" aria-label="Uddy: Eight Seconds"><span class="title-heading-brand">Uddy:</span><span class="title-heading-word">Eight</span><span class="title-heading-word">Seconds</span></h1>
+              <p class="title-sub">Outdoor field hockey shoot-out &amp; free practice</p>
+            </div>
 
             <div class="title-loading" id="title-loading-wrap" aria-live="polite">
               <div class="title-loading-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="10">
