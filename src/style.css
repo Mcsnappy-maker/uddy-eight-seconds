@@ -1636,3 +1636,124 @@ body {
     padding-right: 10px;
   }
 }
+
+
+/* Portrait gameplay HUD layout, isolated to active touch play only. */
+@media (orientation: portrait) and (max-width: 640px) {
+  /* The rotation recommendation previously sat on top of the joystick,
+     charge meter and shoot buttons. Portrait is a supported playable mode. */
+  .uddy-hud[data-input-device="touch"].is-active-play .portrait-notice {
+    display: none;
+  }
+
+  /* Move the shot-power indicator to unused space below the mobile topbar.
+     It remains visible while the player holds a shot; no controls are lost. */
+  .uddy-hud[data-input-device="touch"].is-active-play .hud-bottom {
+    position: absolute;
+    z-index: 11;
+    top: max(72px, calc(env(safe-area-inset-top) + 60px));
+    right: auto;
+    bottom: auto;
+    left: max(12px, env(safe-area-inset-left));
+    width: min(220px, calc(100vw - 24px));
+    align-items: flex-start;
+    gap: 7px;
+    pointer-events: none;
+  }
+
+  .uddy-hud[data-input-device="touch"].is-active-play .shot-indicator {
+    width: 142px;
+    padding: 6px 9px;
+    background: rgba(11, 22, 40, 0.83);
+  }
+
+  .uddy-hud[data-input-device="touch"].is-active-play .shot-type {
+    margin-bottom: 3px;
+    font-size: 0.72rem;
+  }
+
+  .uddy-hud[data-input-device="touch"].is-active-play .input-hints-bar {
+    width: min(220px, calc(100vw - 24px));
+    max-width: 100%;
+    padding: 6px 9px;
+    font-size: 0.69rem;
+    line-height: 1.35;
+    text-align: left;
+  }
+
+  /* Two independent thumb regions. The joystick is always to the left of
+     the strike grid, with a physical gap even on narrow Android phones. */
+  .uddy-hud[data-input-device="touch"].is-active-play .touch-joystick-zone {
+    left: max(14px, env(safe-area-inset-left));
+    bottom: max(64px, calc(env(safe-area-inset-bottom) + 54px));
+    width: 98px;
+    height: 98px;
+  }
+
+  .uddy-hud[data-input-device="touch"].is-active-play .touch-zone-caption {
+    bottom: -18px;
+    font-size: 0.67rem;
+  }
+
+  .uddy-hud[data-input-device="touch"].is-active-play .touch-strike-zone {
+    right: max(12px, env(safe-area-inset-right));
+    bottom: max(18px, calc(env(safe-area-inset-bottom) + 12px));
+    width: calc(100% - max(142px, env(safe-area-inset-left) + 128px));
+    min-width: 0;
+    align-items: stretch;
+    gap: 5px;
+  }
+
+  .uddy-hud[data-input-device="touch"].is-active-play .touch-strike-subhint {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    font-size: 0.63rem;
+    line-height: 1.35;
+    text-align: right;
+  }
+
+  .uddy-hud[data-input-device="touch"].is-active-play .touch-strike-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 7px;
+    width: 100%;
+  }
+
+  .uddy-hud[data-input-device="touch"].is-active-play .shoot-btn {
+    min-width: 0;
+    min-height: 54px;
+    padding: 8px 5px;
+    font-size: 0.75rem;
+    line-height: 1.15;
+    text-align: center;
+    white-space: normal;
+    overflow-wrap: normal;
+  }
+
+  .uddy-hud[data-input-device="touch"].is-active-play .shoot-btn.feint {
+    grid-column: 1 / -1;
+    justify-self: end;
+    width: min(104px, 100%);
+    min-height: 36px;
+    padding: 6px 9px;
+    font-size: 0.75rem;
+  }
+}
+
+@media (orientation: portrait) and (max-width: 350px) {
+  .uddy-hud[data-input-device="touch"].is-active-play .touch-joystick-zone {
+    left: max(10px, env(safe-area-inset-left));
+    width: 88px;
+    height: 88px;
+  }
+
+  .uddy-hud[data-input-device="touch"].is-active-play .touch-strike-zone {
+    right: max(10px, env(safe-area-inset-right));
+    width: calc(100% - max(116px, env(safe-area-inset-left) + 108px));
+  }
+
+  .uddy-hud[data-input-device="touch"].is-active-play .shoot-btn {
+    font-size: 0.7rem;
+  }
+}
