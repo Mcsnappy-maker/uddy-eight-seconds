@@ -179,7 +179,7 @@ export class EncounterHUD {
         <div class="title-hero-area">
           <div class="title-card">
             <div class="title-identity">
-              <img class="title-crest" src="./assets/branding/uddingston_crest.png" alt="Uddingston Hockey Club castle crest" />
+              <img class="title-crest" src="./assets/branding/uddingston_crest_cutout.svg" alt="Uddingston Hockey Club castle crest" />
               <div class="title-club"><span>Uddingston</span><span>Hockey Club</span></div>
             </div>
 
