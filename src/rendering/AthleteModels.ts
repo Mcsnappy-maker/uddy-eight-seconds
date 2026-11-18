@@ -1,12 +1,15 @@
 import {
+  DynamicTexture,
   Matrix,
   Mesh,
   Node,
+  PBRMaterial,
   Quaternion,
   Scene,
   SceneLoader,
   ShadowGenerator,
   TransformNode,
+  Texture,
   Vector3,
 } from '@babylonjs/core';
 import '@babylonjs/loaders/glTF';
@@ -231,6 +234,126 @@ function registerGltfShadows(meshes: Mesh[], shadowGen?: ShadowGenerator): void 
   }
 }
 
+/**
+ * Finish pass for the imported skinned glTF athletes.
+ *
+ * This deliberately touches ONLY existing PBR materials: no mesh transforms,
+ * skeleton bones, animation curves, stick poses, or gameplay/collider references.
+ * A failed optional finish must never prevent an athlete from being loaded.
+ */
+const surfaceTextures = new WeakMap<Scene, { fabric: DynamicTexture; foam: DynamicTexture }>();
+
+function makeSurfaceNormal(
+  name: string,
+  scene: Scene,
+  type: 'fabric' | 'foam',
+): DynamicTexture {
+  const size = 128;
+  const tex = new DynamicTexture(name, { width: size, height: size }, scene, false);
+  const ctx = tex.getContext() as unknown as CanvasRenderingContext2D;
+  const pixels = ctx.createImageData(size, size);
+
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      // Tiny, tileable surface relief. Kept deliberately subtle so clothing
+      // does not read as plastic, scales or artificial carbon fibre.
+      const ax = (x * Math.PI * 2) / size;
+      const ay = (y * Math.PI * 2) / size;
+      const dx = type === 'fabric'
+        ? (Math.sin(ax * 16) * 3.5 + Math.sin(ay * 12) * 1.5)
+        : (Math.sin(ax * 4) * 6 + Math.cos(ay * 8) * 1.8);
+      const dy = type === 'fabric'
+        ? (Math.sin(ay * 16) * 3.5 + Math.sin(ax * 12) * 1.5)
+        : (Math.sin(ay * 4) * 6 + Math.cos(ax * 8) * 1.8);
+      const p = (y * size + x) * 4;
+      pixels.data[p] = Math.round(128 + dx);
+      pixels.data[p + 1] = Math.round(128 + dy);
+      pixels.data[p + 2] = 255;
+      pixels.data[p + 3] = 255;
+    }
+  }
+  ctx.putImageData(pixels, 0, 0);
+  tex.update(false);
+  tex.wrapU = Texture.WRAP_ADDRESSMODE;
+  tex.wrapV = Texture.WRAP_ADDRESSMODE;
+  tex.uScale = type === 'fabric' ? 4 : 2;
+  tex.vScale = type === 'fabric' ? 4 : 2;
+  return tex;
+}
+
+function refineAthleteMaterials(
+  meshes: readonly Mesh[],
+  scene: Scene,
+  isKeeper: boolean,
+): void {
+  const materials = new Set<PBRMaterial>();
+  const getNormals = () => {
+    let normals = surfaceTextures.get(scene);
+    if (!normals) {
+      normals = {
+        fabric: makeSurfaceNormal('athlete_fabric_micro_normal', scene, 'fabric'),
+        foam: makeSurfaceNormal('keeper_pad_micro_normal', scene, 'foam'),
+      };
+      surfaceTextures.set(scene, normals);
+    }
+    return normals;
+  };
+  const useNormal = (material: PBRMaterial, type: 'fabric' | 'foam', strength: number) => {
+    // Do not overwrite a texture already authored into the CC0 glTF asset.
+    if (material.bumpTexture) return;
+    const normals = getNormals();
+    material.bumpTexture = normals[type];
+    material.bumpTexture.level = strength;
+  };
+
+  for (const mesh of meshes) {
+    const material = mesh.material;
+    if (!(material instanceof PBRMaterial) || materials.has(material)) continue;
+    materials.add(material);
+    const name = material.name.toLowerCase();
+
+    if (name.includes('_mat_jersey') || name.includes('_mat_shorts') || name.includes('_mat_socks')) {
+      // Woven sports kit: soft, low-specular cloth, never glossy plastic.
+      material.metallic = 0;
+      material.roughness = 0.84;
+      useNormal(material, 'fabric', 0.17);
+    } else if (name.includes('_mat_skin')) {
+      // Real skin has broad reflections rather than hard specular highlights.
+      material.metallic = 0;
+      material.roughness = 0.68;
+    } else if (name.includes('_mat_hair')) {
+      material.metallic = 0;
+      material.roughness = 0.81;
+    } else if (name.includes('_mat_shoe') && !name.includes('_mat_shoe_trim')) {
+      material.metallic = 0.03;
+      material.roughness = 0.62;
+    } else if (name.includes('_mat_sole')) {
+      material.metallic = 0;
+      material.roughness = 0.83;
+    } else if (isKeeper && name.includes('_mat_pads')) {
+      // Matte closed-cell foam with moulded depth, not reflective armour.
+      material.metallic = 0;
+      material.roughness = 0.66;
+      useNormal(material, 'foam', 0.32);
+    } else if (isKeeper && name.includes('_mat_helmet')) {
+      // A moderately polished protective shell, distinct from the foam.
+      material.metallic = 0.14;
+      material.roughness = 0.31;
+      material.clearCoat.isEnabled = true;
+      material.clearCoat.intensity = 0.36;
+      material.clearCoat.roughness = 0.27;
+    } else if (isKeeper && name.includes('_mat_cage')) {
+      // Face grille retains metal definition without excessive glare.
+      material.metallic = 0.82;
+      material.roughness = 0.31;
+    } else if (isKeeper && name.includes('_mat_glove')) {
+      material.metallic = 0.02;
+      material.roughness = 0.77;
+      useNormal(material, 'foam', 0.18);
+    }
+  }
+}
+
 async function loadCharacterGltf(
   filename: string,
   scene: Scene,
@@ -242,6 +365,13 @@ async function loadCharacterGltf(
   gltfRoot.parent = parentRoot;
   const meshes = res.meshes.filter((m): m is Mesh => m instanceof Mesh && m.getTotalVertices() > 0);
   registerGltfShadows(meshes, shadowGen);
+  try {
+    refineAthleteMaterials(meshes, scene, filename === 'uddy_goalkeeper.glb');
+  } catch (error) {
+    // The imported characters and their existing gameplay must still load if
+    // optional cosmetic texture generation fails on a browser or GPU.
+    console.warn('Optional athlete material finish unavailable; using original glTF materials.', error);
+  }
   return new SkinnedGltfRig(gltfRoot, meshes);
 }
 
