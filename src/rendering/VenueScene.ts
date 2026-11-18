@@ -52,7 +52,7 @@ export class VenueScene {
     this.hemiLight = new HemisphericLight('hemi', new Vector3(0, 1, 0), this.scene);
     this.hemiLight.intensity = 0.55;
     this.hemiLight.diffuse = Color3.FromHexString('#DCE9FF');
-    this.hemiLight.groundColor = Color3.FromHexString('#12243E');
+    this.hemiLight.groundColor = Color3.FromHexString('#183353');
 
     this.mainSunLight = new DirectionalLight(
       'key_light',
@@ -79,7 +79,7 @@ export class VenueScene {
       const target = new Vector3(0, 0.5, 9);
       const dir = target.subtract(pos).normalize();
       const spot = new SpotLight(`flood_${i}`, pos, dir, Math.PI * 0.42, 18, this.scene);
-      spot.diffuse = Color3.FromHexString('#F2F7FF');
+      spot.diffuse = Color3.FromHexString('#F6F9FF');
       spot.intensity = 1.65;
       this.floodSpotLights.push(spot);
     }
@@ -626,11 +626,11 @@ export class VenueScene {
     } else {
       // Hero evening floodlights over Uddingston Night sky
       this.scene.clearColor = Color4.FromHexString(`${UDDINGSTON_COLOURS.NIGHT}FF`);
-      this.hemiLight.intensity = 0.52;
-      this.mainSunLight.intensity = 1.85;
-      this.mainSunLight.diffuse = Color3.FromHexString('#EAF2FF');
+      this.hemiLight.intensity = 0.62;
+      this.mainSunLight.intensity = 1.7;
+      this.mainSunLight.diffuse = Color3.FromHexString('#EEF3FF');
       for (const s of this.floodSpotLights) {
-        s.intensity = tier === 'showcase' ? 2.1 : 1.35;
+        s.intensity = tier === 'showcase' ? 1.9 : 1.4;
       }
     }
 
@@ -645,12 +645,12 @@ export class VenueScene {
       this.pipeline = new DefaultRenderingPipeline('uddy_pipeline', true, this.scene, this.scene.cameras);
       this.pipeline.fxaaEnabled = true;
       this.pipeline.bloomEnabled = true;
-      this.pipeline.bloomThreshold = 0.78;
-      this.pipeline.bloomWeight = 0.25;
+      this.pipeline.bloomThreshold = 0.88;
+      this.pipeline.bloomWeight = 0.16;
       this.pipeline.imageProcessingEnabled = true;
       this.pipeline.imageProcessing.toneMappingEnabled = true;
-      this.pipeline.imageProcessing.contrast = 1.12;
-      this.pipeline.imageProcessing.exposure = 1.05;
+      this.pipeline.imageProcessing.contrast = 1.09;
+      this.pipeline.imageProcessing.exposure = 1.03;
       if (this.shadowGenerator) {
         this.shadowGenerator.getShadowMap()!.refreshRate = 1;
       }
@@ -662,8 +662,8 @@ export class VenueScene {
       this.pipeline.bloomEnabled = false;
       this.pipeline.imageProcessingEnabled = true;
       this.pipeline.imageProcessing.toneMappingEnabled = true;
-      this.pipeline.imageProcessing.contrast = 1.1;
-      this.pipeline.imageProcessing.exposure = 1.04;
+      this.pipeline.imageProcessing.contrast = 1.08;
+      this.pipeline.imageProcessing.exposure = 1.03;
       if (this.shadowGenerator) {
         this.shadowGenerator.getShadowMap()!.refreshRate = 2;
       }

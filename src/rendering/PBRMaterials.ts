@@ -99,6 +99,8 @@ function createTurfMaterial(
   tileScale: number,
   scene: Scene,
 ): PBRMaterial {
+  // This is purely a material finish: the pitch mesh, dimensions, markings and
+  // ball/athlete collision surfaces remain precisely where they were.
   const size = 512;
   const diffuse = new DynamicTexture(`${name}_diff`, { width: size, height: size }, scene, true);
   const ctx = diffuse.getContext() as unknown as CanvasRenderingContext2D;
@@ -109,49 +111,67 @@ function createTurfMaterial(
 
   ctx.fillStyle = baseHex;
   ctx.fillRect(0, 0, size, size);
+
+  // Very restrained cross-pitch tonal drift. A strong half-tile stripe is
+  // conspicuous when this small texture repeats over a full hockey surface.
   ctx.fillStyle = stripeHex;
-  ctx.globalAlpha = 0.14;
+  ctx.globalAlpha = 0.055;
   ctx.fillRect(0, 0, size * 0.5, size);
   ctx.globalAlpha = 1.0;
 
   hCtx.fillStyle = 'rgb(128,128,128)';
   hCtx.fillRect(0, 0, size, size);
 
+  // Same deterministic seed and no additional runtime particles or meshes.
+  // Short tapered yarn/fibre marks replace the earlier coarse rectangular grit.
   let seed = 1337;
   const rand = (): number => {
     seed = (seed * 1664525 + 1013904223) >>> 0;
     return seed / 0xffffffff;
   };
 
-  for (let i = 0; i < 16000; i += 1) {
+  for (let i = 0; i < 14000; i += 1) {
     const x = rand() * size;
     const y = rand() * size;
-    const bright = rand() > 0.5;
-    ctx.fillStyle = bright ? 'rgba(255,255,255,0.065)' : 'rgba(4,16,38,0.10)';
-    ctx.fillRect(x, y, 2, 3);
-    const hv = Math.round(90 + rand() * 110);
-    hCtx.fillStyle = `rgb(${hv},${hv},${hv})`;
-    hCtx.fillRect(x, y, 2, 2);
+    const lit = rand() > 0.5;
+    ctx.fillStyle = lit ? 'rgba(227,244,255,0.072)' : 'rgba(5,21,42,0.095)';
+    ctx.fillRect(x, y, 1, 2 + Math.floor(rand() * 2));
+
+    const height = Math.round(112 + rand() * 32);
+    hCtx.fillStyle = `rgb(${height},${height},${height})`;
+    hCtx.fillRect(x, y, 1, 2);
   }
+
+  // Gentle diffuse-only micro-variation prevents a featureless smooth floor.
+  // Deterministic, low contrast and low cost, with no bloom or new textures.
+  for (let i = 0; i < 550; i += 1) {
+    const x = rand() * size;
+    const y = rand() * size;
+    const w = 2 + Math.floor(rand() * 5);
+    ctx.fillStyle = rand() > 0.5
+      ? 'rgba(220,240,255,0.02)'
+      : 'rgba(7,22,42,0.025)';
+    ctx.fillRect(x, y, w, 1);
+  }
+
   diffuse.update(false);
   diffuse.wrapU = Texture.WRAP_ADDRESSMODE;
   diffuse.wrapV = Texture.WRAP_ADDRESSMODE;
   diffuse.uScale = tileScale;
   diffuse.vScale = tileScale;
 
-  const normal = buildNormalFromHeightCanvas(`${name}_nrm`, hCanvas, 2.2, scene);
+  const normal = buildNormalFromHeightCanvas(`${name}_nrm`, hCanvas, 1.45, scene);
   normal.uScale = tileScale;
   normal.vScale = tileScale;
 
   const mat = new PBRMaterial(name, scene);
   mat.albedoTexture = diffuse;
   mat.bumpTexture = normal;
-  mat.bumpTexture.level = 0.65;
-  mat.metallic = 0.04;
-  mat.roughness = 0.42;
-  mat.clearCoat.isEnabled = true;
-  mat.clearCoat.intensity = 0.16;
-  mat.clearCoat.roughness = 0.32;
+  mat.bumpTexture.level = 0.5;
+  mat.metallic = 0.01;
+  mat.roughness = 0.74;
+  // Artificial hockey turf is fibrous and matte, not a lacquered floor.
+  mat.clearCoat.isEnabled = false;
   return mat;
 }
 
