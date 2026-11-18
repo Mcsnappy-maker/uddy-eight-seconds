@@ -185,7 +185,7 @@ export class EncounterHUD {
 
             <div class="title-copy">
               <div class="title-eyebrow"><span class="title-eyebrow-rule" aria-hidden="true"></span>Outdoor field hockey</div>
-              <h1 class="title-heading"><span class="title-heading-brand">Uddy:</span><span class="title-heading-word">Eight</span><span class="title-heading-word">Seconds</span></h1>
+              <h1 class="title-heading" aria-label="Uddy: Eight Seconds"><span class="title-heading-brand">Uddy:</span><span class="title-heading-word">Eight</span><span class="title-heading-word">Seconds</span></h1>
               <p class="title-sub">Outdoor field hockey shoot-out &amp; free practice</p>
             </div>
 
