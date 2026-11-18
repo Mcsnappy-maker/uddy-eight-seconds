@@ -278,6 +278,8 @@ function makeSurfaceNormal(
   tex.wrapV = Texture.WRAP_ADDRESSMODE;
   tex.uScale = type === 'fabric' ? 4 : 2;
   tex.vScale = type === 'fabric' ? 4 : 2;
+  // Bump strength belongs to the shared texture, not an individual material.
+  tex.level = type === 'fabric' ? 0.17 : 0.24;
   return tex;
 }
 
@@ -298,12 +300,11 @@ function refineAthleteMaterials(
     }
     return normals;
   };
-  const useNormal = (material: PBRMaterial, type: 'fabric' | 'foam', strength: number) => {
+  const useNormal = (material: PBRMaterial, type: 'fabric' | 'foam') => {
     // Do not overwrite a texture already authored into the CC0 glTF asset.
     if (material.bumpTexture) return;
     const normals = getNormals();
     material.bumpTexture = normals[type];
-    material.bumpTexture.level = strength;
   };
 
   for (const mesh of meshes) {
@@ -316,7 +317,7 @@ function refineAthleteMaterials(
       // Woven sports kit: soft, low-specular cloth, never glossy plastic.
       material.metallic = 0;
       material.roughness = 0.84;
-      useNormal(material, 'fabric', 0.17);
+      useNormal(material, 'fabric');
     } else if (name.includes('_mat_skin')) {
       // Real skin has broad reflections rather than hard specular highlights.
       material.metallic = 0;
@@ -334,7 +335,7 @@ function refineAthleteMaterials(
       // Matte closed-cell foam with moulded depth, not reflective armour.
       material.metallic = 0;
       material.roughness = 0.66;
-      useNormal(material, 'foam', 0.32);
+      useNormal(material, 'foam');
     } else if (isKeeper && name.includes('_mat_helmet')) {
       // A moderately polished protective shell, distinct from the foam.
       material.metallic = 0.14;
@@ -349,7 +350,7 @@ function refineAthleteMaterials(
     } else if (isKeeper && name.includes('_mat_glove')) {
       material.metallic = 0.02;
       material.roughness = 0.77;
-      useNormal(material, 'foam', 0.18);
+      useNormal(material, 'foam');
     }
   }
 }
